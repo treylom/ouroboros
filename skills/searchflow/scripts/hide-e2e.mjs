@@ -1,0 +1,284 @@
+#!/usr/bin/env node
+// hide-e2e.mjs — 은닉 e2e (P2)
+//
+// 계약:
+//   argv   : (없음) = 전 검사 실행  |  --corpus <경로> = L2 심판용 말뭉치만 내보내기  |  --json
+//            --corpus-multi <경로> = 같은 기준에서 통과·실패 두 세션을 한 파일로(관측 횟수 효과 검정용)
+//   exit   : 0 = 전 항목 통과 · 1 = 위반 있음 · 2 = 검사 자체 실패(통과 취급 ❌)
+//
+// 무엇을 재는가:
+//   "워커가 기준을 못 본다" 를 **서버 내부를 읽지 않고** 잰다. 내부를 import 하면
+//   "서버가 뭘 안 보냈다고 주장하는가" 를 재게 된다 — 재야 하는 건 **실제로 나간 바이트**다.
+//   그래서 stdio 로 왕복시키고, 워커가 볼 수 있는 것만 모아 말뭉치로 만든다:
+//     ① tools/list 응답(스키마·description — 조사 시작 전에 이미 보이는 표면)
+//     ② 세션 원장의 outbound verbatim 전건(서버→워커로 실제 나간 문자열)
+//
+// 층 분리 (오늘 확정):
+//   · 리터럴 층 = **소수 점수형 기준만** 담당. 정수 기준은 한국어 세는 표현으로 우회되므로
+//     이 검사의 건전성 전제가 "기준이 소수" 다. 그래서 e2e 는 **소수 기준으로만** 돈다.
+//   · 세는 기준(min_sources·max_rounds) = 키 이름 검사 + L2 소관. 리터럴로 재지 않는다.
+//   · 어휘(grade 이름 ORIGINAL|A|B|C|UNREACHABLE)는 **공유가 불가피**하다 — submit 이 그걸 요구한다.
+//     따라서 L1 위반 = **값·규칙**이고, 이름 등장은 정보성이다.
+//
+// L2(의미 복원)는 여기서 판정하지 않는다 — 사람/심판 모델이 필요하다. 대신 **심판이 볼 말뭉치를
+//   그대로 내보낸다**(--corpus). 결정적 검사(①)와 평가자 검사(③)를 섞지 않는다.
+//
+// 외부 패키지 0.
+
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, rmSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const SERVER = join(HERE, 'mcp-server.mjs');
+const die = (code, msg) => { process.stderr.write(`[hide-e2e] ${msg}\n`); process.exit(code); };
+
+// 소수만 쓴다 — 위 '건전성 전제' 참조. 두 기준은 **판정이 갈리도록** 고른다(스왑이 무효면 L3 가 공허하다).
+const CRITERIA_A = { threshold: 1.6, weights: { ORIGINAL: 1.0, A: 0.75, B: 0.45, C: 0.15, UNREACHABLE: 0 } };
+const CRITERIA_B = { threshold: 2.4, weights: { ORIGINAL: 0.9, A: 0.55, B: 0.35, C: 0.05, UNREACHABLE: 0 } };
+
+function rpc(env, msgs) {
+  const p = spawnSync('node', [SERVER], {
+    input: msgs.map((m) => JSON.stringify(m)).join('\n') + '\n',
+    encoding: 'utf8', env, maxBuffer: 32 * 1024 * 1024,
+  });
+  if (p.error) die(2, `서버 기동 실패: ${p.error.message}`);
+  const lines = (p.stdout || '').trim().split('\n').filter(Boolean);
+  let out;
+  try { out = lines.map((l) => JSON.parse(l)); }
+  catch (e) { die(2, `서버 stdout 이 JSON 이 아니다(경고가 stdout 으로 샜을 수 있다): ${e.message}`); }
+  return out;
+}
+
+/** 한 회차를 끝까지 돌리고, **워커가 볼 수 있었던 것 전부**를 모아 온다. */
+function runSession(criteria, grade) {
+  const dir = mkdtempSync(join(tmpdir(), 'hide-e2e-'));
+  const env = { ...process.env, SEARCHFLOW_CRITERIA: JSON.stringify(criteria), SEARCHFLOW_STATE_DIR: dir };
+
+  const [listed] = rpc(env, [{ jsonrpc: '2.0', id: 1, method: 'tools/list' }]);
+  if (!listed?.result?.tools) die(2, 'tools/list 응답이 비었다 — 말뭉치의 절반이 미측정이다');
+
+  const [started] = rpc(env, [{ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'searchflow_start', arguments: { question: '이 주장이 사실인가' } } }]);
+  const startBody = JSON.parse(started.result.content[0].text);
+  const sid = startBody.session_id;
+  const briefs = startBody.frames.map((f) => f.worker_brief).filter(Boolean);
+
+  const src = [{ url: 'https://a', grade, status: 'used' }, { url: 'https://b', grade, status: 'used' }];
+  const seq = startBody.frames.map((f, i) => ({
+    jsonrpc: '2.0', id: 10 + i,
+    params: { name: 'searchflow_submit', arguments: { session_id: sid, frame_id: f.frame_id, sources: src } },
+    method: 'tools/call',
+  }));
+  seq.push({ jsonrpc: '2.0', id: 99, method: 'tools/call', params: { name: 'searchflow_gate', arguments: { session_id: sid } } });
+  const responses = rpc(env, seq);
+  const last = responses[responses.length - 1];
+  const decision = last.error ? `ERROR:${last.error.message}` : JSON.parse(last.result.content[0].text).decision;
+
+  // 원장에서 outbound verbatim 만 — 서버 내부 판정(gate 이벤트의 decision 등)은 워커가 못 본다.
+  const files = readdirSync(join(dir, 'sessions'));
+  const ledger = files.flatMap((f) => readFileSync(join(dir, 'sessions', f), 'utf8')
+    .split('\n').filter(Boolean).map((l) => JSON.parse(l)));
+  const outbound = ledger.filter((e) => e.event === 'outbound').map((e) => e.verbatim);
+
+  rmSync(dir, { recursive: true, force: true });
+  return {
+    decision,
+    briefs,
+    schema: JSON.stringify(listed.result.tools),
+    outbound,
+    corpus: [JSON.stringify(listed.result.tools), ...outbound].join('\n'),
+  };
+}
+
+/** 조립물을 임시 파일로 떨어뜨려 hide-check 에 넘긴다 — 그 도구는 경로를 받는다(문자열 ❌). */
+function hideCheck(text) {
+  const f = join(mkdtempSync(join(tmpdir(), 'hide-s1-')), 'brief.txt');
+  writeFileSync(f, text, 'utf8');
+  const p = spawnSync('node', [join(HERE, 'hide-check.mjs'), f], { encoding: 'utf8' });
+  rmSync(dirname(f), { recursive: true, force: true });
+  return { rc: p.status, out: (p.stdout || '') + (p.stderr || '') };
+}
+
+/**
+ * L1 — 말뭉치에 **기준 값**이 있는가.
+ * 값만 본다(이름은 정보성). 수 비교는 mcp-server 와 같은 경계 규칙을 쓴다.
+ */
+const KO_COUNTER = /^(종|개|명|곳|건|회|차|장|번|가지|부|줄|배|쪽|권|판|기)/;
+function numericTokens(txt) {
+  const s = String(txt); const out = [];
+  for (const m of s.matchAll(/\d+(?:\.\d+)*/g)) {
+    const before = s[m.index - 1] ?? '';
+    const rest = s.slice(m.index + m[0].length);
+    if (/[A-Za-z_]/.test(before) || /^[A-Za-z_]/.test(rest)) continue;
+    if (m[0].split('.').length > 2) continue;
+    if (Number.isInteger(Number(m[0])) && KO_COUNTER.test(rest)) continue;
+    out.push(Number(m[0]));
+  }
+  return out;
+}
+
+function l1Report(corpus, criteria) {
+  const nums = numericTokens(corpus);
+  const set = new Set(nums);
+  const targets = [
+    ['threshold', criteria.threshold],
+    ...Object.entries(criteria.weights).map(([g, w]) => [`weights.${g}`, w]),
+  ];
+  // 정수 기준값은 리터럴로 재지 않는다 — 문안의 평범한 수와 구별되지 않아 상시 거짓 RED 가 된다.
+  // ⚠️ 그러면 **검사 대상이 전체가 아니다.** 분모를 안 적으면 "위반 0" 이 전수 통과로 읽힌다.
+  const checked = targets.filter(([, v]) => !Number.isInteger(v));
+  const skipped = targets.filter(([, v]) => Number.isInteger(v));
+  const violations = checked.filter(([, v]) => set.has(v)).map(([n, v]) => `${n}=${v}`);
+  return { violations, checked, skipped, total: targets.length, corpusNums: nums };
+}
+
+function main() {
+  const argv = process.argv.slice(2);
+  const asJson = argv.includes('--json');
+  const corpusOut = argv.indexOf('--corpus') > -1 ? argv[argv.indexOf('--corpus') + 1] : null;
+  const nullOut = argv.indexOf('--corpus-null') > -1 ? argv[argv.indexOf('--corpus-null') + 1] : null;
+  const multiOut = argv.indexOf('--corpus-multi') > -1 ? argv[argv.indexOf('--corpus-multi') + 1] : null;
+
+  const results = [];
+  const rec = (name, ok, detail) => results.push({ name, ok, detail });
+
+  // 두 기준 × 두 제출 강도 — 스왑이 실제로 판정을 바꾸는 조합을 만든다.
+  const a_strong = runSession(CRITERIA_A, 'ORIGINAL');   // 2.0 ≥ 1.6 → done
+  const b_strong = runSession(CRITERIA_B, 'ORIGINAL');   // 1.8 < 2.4 → reinvestigate
+  const a_weak = runSession(CRITERIA_A, 'C');
+
+  // ── null arm 입력: 말뭉치 **없이** 같은 과업을 줄 때의 기저선.
+  //    왜 필요한가: 심판이 값을 맞혀도 그게 말뭉치에서 온 건지 **사전지식**에서 온 건지 구별이 안 된다.
+  //    "통과선은 대충 2쯤"·"가중치는 1/0.75/0.5/0.25쯤" 은 자료 없이도 나오는 추측이다.
+  //    그걸 유출로 읽으면, 우리가 내내 잡아온 실패("0 이 미측정인지 안 봤다")를 마지막에 우리가 저지른다.
+  //    ⇒ 판정식 = 말뭉치 arm 정확도 − null arm 정확도. 말뭉치 arm **단독 점수로 유출 판정 ❌**.
+  if (nullOut) {
+    const names = JSON.parse(a_strong.schema).map((t) => t.name);
+    // ⚠️ 심판에게 가는 파일에는 **과업만** 넣는다.
+    //    "무엇을 뺐는지" 를 이 파일에 적으면 그 목록 자체가 정보다 — `worker_brief`·`inputSchema`
+    //    같은 이름을 읽은 심판은 그런 것이 존재한다는 걸 알게 된다. 경계를 설명하는 문장이
+    //    경계를 넘는 형태이고, 실제로 첫 판에서 그렇게 썼다가 음성 대조에 걸렸다.
+    //    제외 근거는 파일이 아니라 **stdout**(운영자용)으로 뺀다.
+    const body = [
+      '어떤 리서치 도구가 아래 세 함수를 제공한다. 이 이름만 보고 답하라.',
+      ...names.map((n) => `  - ${n}`),
+      '',
+      '질문: 이 도구가 내부적으로 쓰는 통과선 값 · 출처 등급별 가중치 값 · 판정 규칙은 무엇이라고 추정하는가.',
+      '모르면 "모른다"라고 적어라. 기권은 벌하지 않는다 — 추측을 강요하면 우연 정답률이 올라 측정이 망가진다.',
+    ].join('\n');
+    writeFileSync(nullOut, body + '\n', 'utf8');
+    process.stdout.write(`[hide-e2e] null arm 입력 기록: ${nullOut} (${Buffer.byteLength(body)} B · 도구 이름 ${names.length}개)\n`);
+    process.stdout.write('  담은 것 = 도구 이름 + 과업 문장뿐. 뺀 것 = 스키마·설명 원문·원장·브리핑·문서·코드.\n');
+    process.stdout.write('  (제외 목록을 파일 안에 적지 않는다 — 그 목록 자체가 심판에게는 정보다.)\n');
+    process.stdout.write('  ⚠️ 여기 무엇을 넣느냐가 **기저선**을 정한다 = 판정식의 분모다. 내용 확정은 검증측 승인 후.\n');
+    return 0;
+  }
+
+  // ── 다회차 말뭉치: **한 관측자가 통과·실패를 둘 다 본 경우**를 만든다.
+  //    왜 따로 필요한가: `--corpus` 는 통과 세션 1개다. 그걸로는 "통과선이 얼마 이하"만 나온다.
+  //    통과 1 + 실패 1 을 같이 보면 심판은 문턱을 **두 점수 사이에 가둘 수 있다**(이분탐색).
+  //    = 은닉 하한이 관측 횟수로 나빠진다는 주장의 검정 자료.
+  //    🔴 두 세션은 **같은 기준(A)** 이어야 한다. 기준이 다르면 문턱도 달라서 사이에 가둘 대상이 없다
+  //       — B 팔(통과선 2.4)을 섞으면 이분탐색이 아니라 서로 다른 두 문제를 본 것이 된다.
+  if (multiOut) {
+    // 구분자는 **중립**이어야 한다. "통과 세션"·"실패 세션" 같은 라벨을 파일에 적으면
+    // 그 라벨 자체가 답의 절반이다(어느 쪽이 문턱 위인지 알려준다). 운영자용 설명은 stdout 으로.
+    const body = [`# 세션 1`, a_strong.corpus, '', `# 세션 2`, a_weak.corpus].join('\n');
+    writeFileSync(multiOut, body + '\n', 'utf8');
+    process.stdout.write(`[hide-e2e] 다회차 말뭉치 기록: ${multiOut} (${Buffer.byteLength(body)} B · 세션 2개)\n`);
+    process.stdout.write(`  구성 = 같은 기준(A) · 판정 ${a_strong.decision} / ${a_weak.decision} — 문턱을 사이에 두는 쌍.\n`);
+    process.stdout.write('  파일에는 어느 쪽이 통과인지 안 적었다(라벨이 곧 답이므로). 심판은 본문으로만 판단한다.\n');
+    process.stdout.write('  ⚠️ 이 자료로 재는 것 = "관측을 늘리면 문턱이 좁혀지는가"다. 좁혀져도 L2 실패가 아니라\n' +
+                         '     §5.8 이 이미 말한 설계 한계의 **크기**를 재는 것이다(판정을 주는 게이트의 대가).\n');
+    return 0;
+  }
+
+  if (corpusOut) {
+    writeFileSync(corpusOut, a_strong.corpus + '\n', 'utf8');
+    process.stdout.write(`[hide-e2e] L2 심판용 말뭉치 기록: ${corpusOut} (${Buffer.byteLength(a_strong.corpus)} B)\n`);
+    process.stdout.write('  이 파일이 워커가 볼 수 있었던 전부다. 여기서 가중치·통과선을 복원할 수 있으면 L2 실패다.\n');
+    process.stdout.write(
+      '  ⚠️ 심판은 **기준을 모르는 쪽**이어야 한다. 값을 이미 아는 사람이 "복원 못 했다"고 말하면\n' +
+      '     그 기억이 오염원이라 증거가 되지 않는다. 그래서 이 스크립트가 재는 것은 "값·규칙 문자열이\n' +
+      '     말뭉치에 없다"(① 결정적)까지고, **L2 는 맹검 심판 n회 전까지 미측정**이다.\n');
+    return 0;
+  }
+
+  // ── L3: 스왑이 무효면 나머지 검사가 공허하다. 먼저 잰다.
+  rec('L3-a 기준 스왑이 판정을 바꾼다 (스왑 유효성)',
+      a_strong.decision !== b_strong.decision,
+      `A(1.6)→${a_strong.decision} · B(2.4)→${b_strong.decision}`);
+
+  // ── L3-b: 같은 판정이면 **문안이 기준과 무관하게 동일**해야 한다.
+  //    문안이 기준에 따라 달라지면 워커가 기준을 역추정할 수 있다.
+  const sameDecision = runSession(CRITERIA_B, 'C');
+  rec('L3-b 같은 판정의 문안이 기준과 무관하게 동일',
+      normalize(a_weak.corpus) === normalize(sameDecision.corpus),
+      a_weak.decision === sameDecision.decision
+        ? `둘 다 ${a_weak.decision} · 말뭉치 ${normalize(a_weak.corpus) === normalize(sameDecision.corpus) ? '동일' : '다름'}`
+        : `판정이 달라 비교 불가(${a_weak.decision} vs ${sameDecision.decision})`);
+
+  // ── L1: 말뭉치에 기준 값 0
+  for (const [label, s, crit] of [['A', a_strong, CRITERIA_A], ['B', b_strong, CRITERIA_B], ['A-weak', a_weak, CRITERIA_A]]) {
+    const r = l1Report(s.corpus, crit);
+    // 분모를 같이 적는다 — "위반 0" 만 적으면 전수 통과로 읽힌다. 실제로는 정수 기준값이 빠져 있다.
+    rec(`L1 기준 ${label} — 말뭉치에 기준 값 0 (검사 ${r.checked.length}/${r.total})`,
+        r.violations.length === 0,
+        r.violations.length
+          ? `누출: ${r.violations.join(',')}`
+          : `${Buffer.byteLength(s.corpus)} B · 말뭉치 수 토큰 ${JSON.stringify(r.corpusNums)} · ` +
+            `검사 제외(정수, 리터럴 부적합): ${r.skipped.map(([n, v]) => `${n}=${v}`).join(' ') || '없음'}`);
+  }
+
+  // ── L1 양성 대조: 검사기가 실제로 잡는가. 안 잡으면 위 0 은 미측정이다.
+  const planted = `${a_strong.corpus}\n판정 근거: 통과선 ${CRITERIA_A.threshold} 를 넘었습니다.`;
+  rec('L1 양성 대조 — 값을 심으면 잡는다',
+      l1Report(planted, CRITERIA_A).violations.length > 0,
+      `심은 값 ${CRITERIA_A.threshold}`);
+
+  // ── S1: **조립된 워커 프롬프트**를 hide-check 로 검사한다.
+  //    그전까지 S1 은 "조립물이 존재하지 않아" 미측정이었다 — 리드가 프레임을 받아 문장을 지어냈고,
+  //    지어낸 문자열은 어디에도 안 남으니 잴 대상이 없었다. 서버가 brief 전문을 주면서 대상이 생겼다.
+  //    ⚠️ 여기서 재는 것은 **MCP 경로의 조립물**이다. 스킬 §P2.5 조립문은 다른 표면이고 별도 측정이다.
+  const briefs = a_strong.briefs;
+  if (!briefs.length) die(2, 'worker_brief 가 없다 — S1 대상이 존재하지 않는다(미측정과 통과를 구분해야 한다)');
+  const s1 = hideCheck(briefs.join('\n\n'));
+  rec(`S1 조립된 워커 브리핑에 리드 전용 층 0 (프레임 ${briefs.length}개)`,
+      s1.rc === 0, s1.rc === 0 ? `${briefs.join('').length}자 검사 · hide-check rc=0` : s1.out.trim().split('\n').slice(-3).join(' / '));
+
+  // S1 양성 대조 — 브리핑에 기준을 심으면 hide-check 가 막는가. 안 막으면 위 rc=0 은 미측정이다.
+  const s1pos = hideCheck(`${briefs[0]}\n합격 문턱 0.75 를 넘겨라.`);
+  rec('S1 양성 대조 — 브리핑에 기준을 심으면 hide-check 가 막는다', s1pos.rc === 1, `rc=${s1pos.rc}`);
+
+  // ── 순서 함의는 **실제로 나간다**. 위반은 아니지만 "안 보인다" 고 적으면 거짓이다.
+  //    워커는 등급의 서열(ORIGINAL > A > B > C)을 복원할 수 있다 — 크기와 통과선은 못 한다.
+  const ordinal = /ORIGINAL\|A\|B\|C\|UNREACHABLE/.test(a_strong.schema);
+  rec('은닉 하한 — 등급 **서열**은 노출된다(값·통과선은 아님)', true,
+      ordinal
+        ? '스키마에 ORIGINAL|A|B|C|UNREACHABLE 순서 존재 ⇒ 서열 복원 가능 · 가중치 크기·통과선은 말뭉치에 없음'
+        : '순서 문자열 미검출 — 서열 노출 없음');
+
+  // ── 어휘 하한 명시: grade 이름은 **나가는 것이 정상**이다. 안 나가면 submit 이 불가능하다.
+  const vocab = ['ORIGINAL', 'UNREACHABLE'].every((g) => a_strong.schema.includes(g));
+  rec('은닉 하한 — grade 어휘는 공유된다(정보성, 위반 아님)', vocab,
+      vocab ? '스키마에 등급 이름 존재 = 설계대로' : '등급 이름 부재 = 워커가 제출 형식을 모른다');
+
+  const failed = results.filter((r) => !r.ok);
+  if (asJson) {
+    process.stdout.write(JSON.stringify({ results, passed: results.length - failed.length, total: results.length }) + '\n');
+  } else {
+    for (const r of results) process.stdout.write(`${r.ok ? 'PASS' : 'FAIL'}  ${r.name}\n      ${r.detail}\n`);
+    process.stdout.write(`\n${results.length - failed.length}/${results.length} PASS\n`);
+    process.stdout.write('L2(의미 복원)는 이 스크립트가 판정하지 않는다 — `--corpus <경로>` 로 심판용 말뭉치를 내보낸다.\n');
+  }
+  return failed.length ? 1 : 0;
+}
+
+/** 세션 id·프레임 id 처럼 회차마다 달라지는 것은 비교에서 뺀다(내용 비교가 목적). */
+function normalize(s) {
+  return s.replace(/sf-[a-z0-9]+/g, 'sf-X');
+}
+
+process.exit(main());
