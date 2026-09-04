@@ -96,7 +96,9 @@ others are not available to borrow. Each shape is closed: every field it
 requires must be present, and any field it does not name is rejected — the
 generic advisory fields (`finding`, `evidence`, `suggested_options`) as much as
 a value this prompt showed you as context. What the Session block tells you is
-for your reasoning, not for your output.
+for your reasoning, not for your output — except a field the contract itself
+requires you to copy (such as `question_identity`), which must be reproduced
+exactly as shown there.
 
 Your output is validated against that contract when the parent submits it. An
 answer in any other shape is discarded. When this lane is marked required, the

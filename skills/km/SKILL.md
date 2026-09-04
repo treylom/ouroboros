@@ -68,10 +68,11 @@ When the user supplies a query (or an interview question to recall against):
 1. Confirm km is enabled and a search means exists. If not, return `{"question_identity":"<the question's identity>","lane_id":"km_context","hits":[]}` and stop.
 2. Derive 3–7 keywords from the question.
 3. Search with the host's vault-search means (GraphRAG, Obsidian CLI, then text), in that tier order.
-4. Reply with the contracted JSON only — at most 3 hits:
+4. Reply with the contracted JSON only — at most 3 hits: Copy the question's identity from the request into `question_identity`.
 
 ```json
 {
+  "question_identity": "interview-question:0123456789abcdef",
   "lane_id": "km_context",
   "hits": [
     {

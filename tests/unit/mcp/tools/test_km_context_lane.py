@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+import re
 from typing import Any
 
 from jsonschema import Draft202012Validator
@@ -203,3 +205,36 @@ def test_skill_doc_paths_and_sections() -> None:
     assert "## Manual recall once" in text
     assert "\n## Once\n" not in text
     assert "current session only" in text
+
+
+def test_skill_doc_fenced_json_examples_validate() -> None:
+    doc = Path(__file__).resolve().parents[4] / "skills" / "km" / "SKILL.md"
+    blocks = re.findall(r"```json\n(.*?)```", doc.read_text(encoding="utf-8"), re.DOTALL)
+    assert len(blocks) >= 1
+    schema = _interview_km_hits_answer_contract()["response_model_schema"]
+    validator = Draft202012Validator(schema)
+    for block in blocks:
+        assert validator.is_valid(json.loads(block))
+
+
+@pytest.mark.parametrize(
+    ("identity", "expected"),
+    [
+        ("bad", False),
+        ("interview-question:xyz", False),
+        ("pm-question:0123456789abcde", False),
+        ("pm-question:0123456789abcdef", True),
+    ],
+)
+def test_invalid_question_identity_pattern_is_rejected(identity: str, expected: bool) -> None:
+    schema = _interview_km_hits_answer_contract()["response_model_schema"]
+    candidate = _valid_hits()
+    candidate["question_identity"] = identity
+    assert Draft202012Validator(schema).is_valid(candidate) is expected
+
+
+def test_child_prompt_has_no_output_contradiction() -> None:
+    prompt = _km_payloads(_interview_payloads())[0]["prompt"]
+    assert "not for your output — except a field the contract itself" in prompt
+    assert "question_identity" in prompt
+    assert "not for your output." not in prompt
