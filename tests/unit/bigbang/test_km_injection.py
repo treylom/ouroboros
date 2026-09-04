@@ -42,7 +42,7 @@ def _state() -> InterviewState:
 
 def test_interview_stub_hits_include_label() -> None:
     engine = InterviewEngine(llm_adapter=MagicMock())
-    prompt = engine._build_system_prompt(_state(), km_recall=_hits())
+    prompt = engine._build_system_prompt(_state(), km_recall=_hits(), max_chars=4000)
     assert "## Knowledge recall" in prompt
     assert "100-project/spec.md" in prompt
 
@@ -77,7 +77,7 @@ def test_seed_and_pm_stub_hits_include_label(tmp_path: Path) -> None:
 
     pm = PMInterviewEngine.create(llm_adapter=MagicMock(), state_dir=tmp_path)
     pm._install_pm_steering()
-    pm_prompt = pm.inner._build_system_prompt(state, km_recall=_hits())
+    pm_prompt = pm.inner._build_system_prompt(state, km_recall=_hits(), max_chars=5000)
     assert "## Knowledge recall" in pm_prompt
     assert "100-project/spec.md" in pm_prompt
 
@@ -92,3 +92,41 @@ def test_small_max_prompt_chars_drops_label_keeps_body() -> None:
     assert "## Knowledge recall" not in capped
     assert "Build a CLI tool" in capped
     assert capped == baseline
+
+
+def test_saturated_cap_drops_label_keeps_focus(tmp_path: Path) -> None:
+    engine = InterviewEngine(llm_adapter=MagicMock())
+    state = _state()
+    cap = 1000
+    baseline = engine._build_system_prompt(state, km_recall=_empty(), max_chars=cap)
+    assert "Focus:" in baseline
+    capped = engine._build_system_prompt(state, km_recall=_hits(), max_chars=cap)
+    focus_line = baseline[baseline.index("Focus:") :].split("\n", 1)[0]
+    assert "## Knowledge recall" not in capped
+    assert focus_line in capped
+    assert capped == baseline
+
+    generous = engine._build_system_prompt(state, km_recall=_hits(), max_chars=4000)
+    assert "## Knowledge recall" in generous
+    assert "100-project/spec.md" in generous
+
+    pm = PMInterviewEngine.create(llm_adapter=MagicMock(), state_dir=tmp_path)
+    pm._install_pm_steering()
+    pm_base = pm.inner._build_system_prompt(state, km_recall=_empty(), max_chars=cap)
+    pm_hits = pm.inner._build_system_prompt(state, km_recall=_hits(), max_chars=cap)
+    assert "## Knowledge recall" not in pm_hits
+    assert pm_hits == pm_base
+    pm_wide = pm.inner._build_system_prompt(state, km_recall=_hits(), max_chars=5000)
+    assert "## Knowledge recall" in pm_wide
+
+
+def test_injected_recaller_honors_max_label_chars() -> None:
+    from ouroboros.bigbang.interview import _km_data_label
+
+    recaller = KMRecall(KMConfig(max_label_chars=50), searchers=[_hit_search])
+    label = _km_data_label("Build a CLI tool Linux", km_recall=recaller)
+    assert label
+    assert len(label) <= 50
+    engine = InterviewEngine(llm_adapter=MagicMock())
+    prompt = engine._build_system_prompt(_state(), km_recall=recaller, max_chars=4000)
+    assert label in prompt

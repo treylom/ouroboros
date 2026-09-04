@@ -727,20 +727,27 @@ def _km_data_label(
     text: str,
     *,
     km_recall: KMRecall | None = None,
-    max_label_chars: int = 600,
+    max_label_chars: int | None = None,
 ) -> str:
     """Return a data-only recall label, or empty on any failure."""
     try:
+        from ouroboros.config.loader import load_config
+
         recaller = km_recall
         cap = max_label_chars
         if recaller is None:
-            from ouroboros.config.loader import load_config
-
             cfg = load_config().km
             if not cfg.enabled:
                 return ""
-            cap = cfg.max_label_chars
+            if cap is None:
+                cap = cfg.max_label_chars
             recaller = KMRecall(cfg)
+        elif cap is None:
+            stored = getattr(recaller, "_config", None)
+            if stored is not None:
+                cap = stored.max_label_chars
+            else:
+                cap = load_config().km.max_label_chars
         hits = recaller.recall(text)
         query = extract_query(text) or text
         return render_label(query, hits, max_chars=cap)
@@ -1318,7 +1325,9 @@ class InterviewEngine:
         """
         from ouroboros.agents.loader import load_agent_prompt
 
-        max_prompt_chars = max_chars or self._MAX_SYSTEM_PROMPT_CHARS
+        designed_cap = type(self)._MAX_SYSTEM_PROMPT_CHARS
+        caller_cap = max_chars if max_chars is not None else self._MAX_SYSTEM_PROMPT_CHARS
+        max_prompt_chars = min(caller_cap, designed_cap)
         effective_round_number = self._next_conversation_round_number(state)
         round_info = f"Round {effective_round_number}"
 
@@ -1391,19 +1400,6 @@ class InterviewEngine:
 
         _OVERHEAD = 20  # newlines, ellipsis, separators
 
-        recall_input = " ".join(
-            part
-            for part in (prompt_initial_context, _latest_user_answer(state))
-            if part
-        )
-        label = _km_data_label(recall_input, km_recall=km_recall)
-        if label:
-            marker = f"Initial context: {prompt_initial_context}\n"
-            header_with_label = dynamic_header.replace(marker, f"{marker}{label}\n", 1)
-            # Drop the label before truncating the header / initial context.
-            if len(header_with_label) + _OVERHEAD <= max_prompt_chars:
-                dynamic_header = header_with_label
-
         # Preserve the dynamic header first; it contains the capped initial
         # context and first-turn instructions. Trim the optional panel/base
         # prompt before falling back to hard-truncating the header.
@@ -1430,6 +1426,19 @@ class InterviewEngine:
         # Hard-truncate as final safety net
         if len(full_prompt) > max_prompt_chars:
             full_prompt = full_prompt[:max_prompt_chars]
+
+        recall_input = " ".join(
+            part
+            for part in (prompt_initial_context, _latest_user_answer(state))
+            if part
+        )
+        label = _km_data_label(recall_input, km_recall=km_recall)
+        extra = len(label) + 1 if label else 0
+        if label and len(full_prompt) + extra <= caller_cap:
+            marker = f"Initial context: {prompt_initial_context}\n"
+            injected = full_prompt.replace(marker, f"{marker}{label}\n", 1)
+            if len(injected) == len(full_prompt) + extra:
+                full_prompt = injected
 
         return full_prompt
 
