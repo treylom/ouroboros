@@ -797,6 +797,26 @@ class SeedConfig(BaseModel, frozen=True):
     verify_command_gate: Literal["warn", "block"] = "warn"
 
 
+class KMConfig(BaseModel, frozen=True):
+    """Knowledge-vault recall settings.
+
+    Attributes:
+        enabled: When false, recall returns no hits.
+        endpoint: Search API base URL. None means auto-detect.
+        vault_path: Vault root for the text fallback. None means auto-detect.
+        top_k: Maximum hits to keep (1-10).
+        timeout_seconds: HTTP timeout for the search API.
+        max_label_chars: Character cap for the data label.
+    """
+
+    enabled: bool = True
+    endpoint: str | None = None
+    vault_path: str | None = None
+    top_k: int = Field(default=3, ge=1, le=10)
+    timeout_seconds: float = Field(default=20.0, ge=0)
+    max_label_chars: int = Field(default=600, ge=1)
+
+
 class OuroborosConfig(BaseModel, frozen=True):
     """Top-level Ouroboros configuration.
 
@@ -818,6 +838,7 @@ class OuroborosConfig(BaseModel, frozen=True):
         runtime_controls: Long-running workflow timeout/progress controls
         logging: Logging configuration
         seed: Seed-authoring gates applied before execution
+        km: Knowledge-vault recall configuration
     """
 
     economics: EconomicsConfig = Field(default_factory=EconomicsConfig)
@@ -836,6 +857,7 @@ class OuroborosConfig(BaseModel, frozen=True):
     orchestrator: OrchestratorConfig = Field(default_factory=OrchestratorConfig)
     telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)
     seed: SeedConfig = Field(default_factory=SeedConfig)
+    km: KMConfig = Field(default_factory=KMConfig)
 
 
 def get_default_config() -> OuroborosConfig:
