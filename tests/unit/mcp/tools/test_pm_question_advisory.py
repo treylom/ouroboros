@@ -191,7 +191,11 @@ def _submit(
 
 def test_pm_runs_only_the_two_evidence_lanes() -> None:
     lanes = _pm_question_advisory_fanout_metadata()["lanes"]
-    assert [lane["lane_id"] for lane in lanes] == ["code_context", "data_context"]
+    assert [lane["lane_id"] for lane in lanes] == [
+        "code_context",
+        "data_context",
+        "km_context",
+    ]
 
 
 def test_no_lane_produces_a_recommended_draft() -> None:
@@ -375,7 +379,7 @@ def test_long_registration_notes_shorten_themselves_and_never_the_roster() -> No
         question=QUESTION,
         repository_roster=roster,
     )
-    assert len(meta["question_advisory_subagents"]) == 2
+    assert len(meta["question_advisory_subagents"]) == 3
 
     rendered = _prompt_json_block(_code_lane_prompt(roster), "## Repository Roster")
     # What the answer is keyed on arrives exactly: the identifier it cites by and
@@ -541,7 +545,9 @@ def test_no_reason_restates_what_the_entries_already_say() -> None:
 
 def test_both_lanes_are_required_and_both_have_a_no_op_answer() -> None:
     lanes = _pm_question_advisory_fanout_metadata()["lanes"]
-    assert all(lane["required"] for lane in lanes)
+    required = [lane for lane in lanes if lane["required"]]
+    assert [lane["lane_id"] for lane in required] == ["code_context", "data_context"]
+    assert all(lane["required"] for lane in required)
     code_states = {
         state["title"]
         for state in pm_code_context_answer_contract()["response_model_schema"]["oneOf"]
@@ -966,6 +972,7 @@ def test_a_question_with_no_roster_still_gets_its_lanes(registry: FanoutRegistry
     assert [payload["context"]["lane_id"] for payload in meta["question_advisory_subagents"]] == [
         "code_context",
         "data_context",
+        "km_context",
     ]
 
 

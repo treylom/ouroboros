@@ -126,7 +126,7 @@ async def test_a_batched_turn_issues_every_question_with_its_own_evidence(
         lane_ids = [
             payload["context"]["lane_id"] for payload in envelope["question_advisory_subagents"]
         ]
-        assert sorted(lane_ids) == ["code_context", "data_context"]
+        assert sorted(lane_ids) == ["code_context", "data_context", "km_context"]
     # The dispatch text carries every question and every envelope's block.
     text = result.value.text_content
     for question in (Q_PRIMARY, Q_SECOND, Q_THIRD):
@@ -794,6 +794,9 @@ def test_every_answer_spec_names_what_its_contract_requires() -> None:
     to the schema rather than to a description of the shape before it.
     """
     from ouroboros.mcp.tools.pm_batch import _ANSWER_SPECS, _answer_section, _lean_schema
+    from ouroboros.orchestrator.capabilities.interview_schemas import (
+        _interview_km_hits_answer_contract,
+    )
     from ouroboros.orchestrator.capabilities.pm_schemas import (
         _interview_data_evidence_answer_contract,
         pm_code_context_answer_contract,
@@ -801,7 +804,11 @@ def test_every_answer_spec_names_what_its_contract_requires() -> None:
 
     contracts = {
         c["contract_id"]: c
-        for c in (pm_code_context_answer_contract(), _interview_data_evidence_answer_contract())
+        for c in (
+            pm_code_context_answer_contract(),
+            _interview_data_evidence_answer_contract(),
+            _interview_km_hits_answer_contract(),
+        )
     }
     assert set(_ANSWER_SPECS) == set(contracts)
 
