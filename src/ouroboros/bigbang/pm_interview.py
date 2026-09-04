@@ -64,6 +64,7 @@ from ouroboros.core.json_utils import extract_json_payload
 from ouroboros.core.owner_only import write_owner_only
 from ouroboros.core.pm_snapshot import refresh_pm_snapshot_worktrees
 from ouroboros.core.types import Result
+from ouroboros.km import KMRecall
 from ouroboros.orchestrator.capabilities.question_text import normalize_question_text
 from ouroboros.providers.base import (
     CompletionConfig,
@@ -585,6 +586,7 @@ class PMInterviewEngine:
             state: InterviewState,
             initial_context: str | None = None,
             max_chars: int | None = None,
+            km_recall: KMRecall | None = None,
         ) -> str:
             return compose_steered_prompt(
                 inner=self.inner,
@@ -594,6 +596,7 @@ class PMInterviewEngine:
                 initial_context=initial_context,
                 max_chars=max_chars,
                 shed_last_marker=_PM_CONTRACT_MARKER,
+                km_recall=km_recall,
             )
 
         self.inner._build_system_prompt = _pm_build_system_prompt  # type: ignore[assignment]

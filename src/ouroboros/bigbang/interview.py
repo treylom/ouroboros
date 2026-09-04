@@ -36,6 +36,7 @@ from ouroboros.interview_adapters import (
     next_unresolved_reference,
     select_glossary_injection,
 )
+from ouroboros.km import KMRecall, extract_query, render_label
 from ouroboros.providers.base import (
     CompletionConfig,
     LLMAdapter,
@@ -714,6 +715,39 @@ class PreparedInterviewQuestion:
     preserve_prefix_messages: int = 0
 
 
+def _latest_user_answer(state: InterviewState) -> str:
+    """Return the most recent non-empty user answer, or empty."""
+    for rnd in reversed(state.rounds):
+        if rnd.user_response:
+            return rnd.user_response
+    return ""
+
+
+def _km_data_label(
+    text: str,
+    *,
+    km_recall: KMRecall | None = None,
+    max_label_chars: int = 600,
+) -> str:
+    """Return a data-only recall label, or empty on any failure."""
+    try:
+        recaller = km_recall
+        cap = max_label_chars
+        if recaller is None:
+            from ouroboros.config.loader import load_config
+
+            cfg = load_config().km
+            if not cfg.enabled:
+                return ""
+            cap = cfg.max_label_chars
+            recaller = KMRecall(cfg)
+        hits = recaller.recall(text)
+        query = extract_query(text) or text
+        return render_label(query, hits, max_chars=cap)
+    except Exception:
+        return ""
+
+
 @dataclass
 class InterviewEngine:
     """Engine for conducting interactive requirement interviews.
@@ -1266,6 +1300,7 @@ class InterviewEngine:
         state: InterviewState,
         initial_context: str | None = None,
         max_chars: int | None = None,
+        km_recall: KMRecall | None = None,
     ) -> str:
         """Build the system prompt for question generation.
 
@@ -1275,6 +1310,8 @@ class InterviewEngine:
                 ``state.initial_context``.
             max_chars: Optional cap for the returned system prompt. When omitted,
                 uses the standard system-prompt cap.
+            km_recall: Optional recall stack for tests. ``None`` loads config
+                and omits the label when loading or recall fails.
 
         Returns:
             The system prompt.
@@ -1353,6 +1390,19 @@ class InterviewEngine:
         perspective_panel = self._build_perspective_panel_prompt(state)
 
         _OVERHEAD = 20  # newlines, ellipsis, separators
+
+        recall_input = " ".join(
+            part
+            for part in (prompt_initial_context, _latest_user_answer(state))
+            if part
+        )
+        label = _km_data_label(recall_input, km_recall=km_recall)
+        if label:
+            marker = f"Initial context: {prompt_initial_context}\n"
+            header_with_label = dynamic_header.replace(marker, f"{marker}{label}\n", 1)
+            # Drop the label before truncating the header / initial context.
+            if len(header_with_label) + _OVERHEAD <= max_prompt_chars:
+                dynamic_header = header_with_label
 
         # Preserve the dynamic header first; it contains the capped initial
         # context and first-turn instructions. Trim the optional panel/base

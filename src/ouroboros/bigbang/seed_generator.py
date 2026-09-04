@@ -30,6 +30,7 @@ from ouroboros.bigbang.answer_provenance import extraction_rounds
 from ouroboros.bigbang.interview import (
     INITIAL_CONTEXT_SUMMARY_QUESTION,
     InterviewState,
+    _km_data_label,
     initial_context_summary_missing,
     prompt_safe_initial_context,
 )
@@ -57,6 +58,7 @@ from ouroboros.core.seed import (
 )
 from ouroboros.core.types import Result
 from ouroboros.evolution.acceptance_contracts import evolve_seed_contract_fields
+from ouroboros.km import KMRecall
 from ouroboros.providers.base import CompletionConfig, LLMAdapter, Message, MessageRole
 
 log = structlog.get_logger()
@@ -2064,11 +2066,17 @@ EXIT_CONDITIONS: [{{"name": "<name>", "description": "<description>", "criteria"
             "never use a bare pipe as the list separator."
         )
 
-    def _build_interview_context(self, state: InterviewState) -> str:
+    def _build_interview_context(
+        self,
+        state: InterviewState,
+        km_recall: KMRecall | None = None,
+    ) -> str:
         """Build context string from interview state.
 
         Args:
             state: The interview state.
+            km_recall: Optional recall stack for tests. ``None`` loads config
+                and omits the label when loading or recall fails.
 
         Returns:
             Formatted context string.
@@ -2100,7 +2108,12 @@ EXIT_CONDITIONS: [{{"name": "<name>", "description": "<description>", "criteria"
             if round_data.answer:
                 parts.append(f"A: {round_data.answer}")
 
-        return "\n".join(parts)
+        text = "\n".join(parts)
+        answers = [rnd.user_response for rnd in state.rounds if rnd.user_response]
+        label = _km_data_label(" ".join(answers[-3:]), km_recall=km_recall)
+        if label:
+            return f"{text}\n{label}"
+        return text
 
     def _build_extraction_system_prompt(self) -> str:
         """Build system prompt for requirement extraction.
