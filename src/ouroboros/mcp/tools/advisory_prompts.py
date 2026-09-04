@@ -99,8 +99,9 @@ a value this prompt showed you as context. What the Session block tells you is
 for your reasoning, not for your output.
 
 Your output is validated against that contract when the parent submits it. An
-answer in any other shape is discarded, and because this lane is required, the
-parent cannot complete the consultation without it."""
+answer in any other shape is discarded. When this lane is marked required, the
+parent cannot complete the consultation without it; when it is optional, a
+discarded answer simply counts as no result."""
 
 
 def _data_context_lane_task() -> str:

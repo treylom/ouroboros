@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from jsonschema import Draft202012Validator
+import pytest
 
+from ouroboros.mcp.tools.advisory_prompts import _advisory_output_section
 from ouroboros.mcp.tools.authoring_handlers import _build_question_advisory_request
 from ouroboros.mcp.tools.question_advisory import (
     _lane_instructions,
@@ -112,3 +115,91 @@ def test_original_six_lane_names_are_unchanged() -> None:
         str(lane["lane_id"]) for lane in _interview_question_advisory_fanout_metadata()["lanes"]
     }
     assert names >= _ORIGINAL_SIX
+
+
+def test_empty_result_requires_question_identity() -> None:
+    schema = _interview_km_hits_answer_contract()["response_model_schema"]
+    validator = Draft202012Validator(schema)
+    without_identity = {"lane_id": "km_context", "hits": []}
+    with_identity = {
+        "question_identity": "interview-question:0123456789abcdef",
+        "lane_id": "km_context",
+        "hits": [],
+    }
+    assert validator.is_valid(without_identity) is False
+    assert validator.is_valid(with_identity) is True
+
+
+def _tier_web() -> dict[str, Any]:
+    bad = _valid_hits()
+    bad["hits"][0]["tier"] = "web"
+    return bad
+
+
+def _four_hits() -> dict[str, Any]:
+    bad = _valid_hits()
+    bad["hits"] = [dict(bad["hits"][0]) for _ in range(4)]
+    return bad
+
+
+def _root_extra_key() -> dict[str, Any]:
+    bad = _valid_hits()
+    bad["notes"] = "extra"
+    return bad
+
+
+def _hit_extra_key() -> dict[str, Any]:
+    bad = _valid_hits()
+    bad["hits"][0]["body"] = "note body"
+    return bad
+
+
+def _wrong_lane_id() -> dict[str, Any]:
+    bad = _valid_hits()
+    bad["lane_id"] = "data_context"
+    return bad
+
+
+@pytest.mark.parametrize(
+    "build_answer",
+    [
+        _tier_web,
+        _four_hits,
+        _root_extra_key,
+        _hit_extra_key,
+        _wrong_lane_id,
+    ],
+)
+def test_invalid_shapes_are_rejected(build_answer: Any) -> None:
+    schema = _interview_km_hits_answer_contract()["response_model_schema"]
+    assert Draft202012Validator(schema).is_valid(build_answer()) is False
+
+
+def test_lane_instruction_empty_shape_includes_identity() -> None:
+    request = _build_question_advisory_request(
+        session_id="sess-km",
+        question=QUESTION,
+        phase="answer",
+        score=None,
+    )
+    km_lane = next(lane for lane in request["lanes"] if lane["lane_id"] == "km_context")
+    instructions = _lane_instructions("km_context", km_lane, request, {})
+    assert instructions is not None
+    assert "question_identity" in instructions[0]
+    assert "question_identity" in _interview_km_hits_answer_contract()["runtime_instruction"]
+
+
+def test_optional_lane_prompt_does_not_claim_required() -> None:
+    section = _advisory_output_section(_interview_km_hits_answer_contract())
+    assert "because this lane is required" not in section
+    assert "optional" in section
+
+
+def test_skill_doc_paths_and_sections() -> None:
+    doc = Path(__file__).resolve().parents[4] / "skills" / "km" / "SKILL.md"
+    text = doc.read_text(encoding="utf-8")
+    assert "~/.claude/km-config.json" in text
+    assert "~/.ouroboros/km-config.json" not in text
+    assert "## Manual recall once" in text
+    assert "\n## Once\n" not in text
+    assert "current session only" in text

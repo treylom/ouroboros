@@ -11,7 +11,7 @@ Configure and inspect knowledge-vault recall used by interview and PM advisory `
 
 Recall existing notes from the user's knowledge vault that may already answer an interview or seed-generation question. The `km_context` lane reports **paths and one-line summaries only** — never note bodies, never a stand-in answer.
 
-Hits are capped at 3. Each hit carries `path`, `one_line` (max 200 chars), `score`, and `tier` (`graphrag` | `obsidian_cli` | `text`). If this host has no vault-search means, the lane returns `{"lane_id":"km_context","hits":[]}`.
+Hits are capped at 3. Each hit carries `path`, `one_line` (max 200 chars), `score`, and `tier` (`graphrag` | `obsidian_cli` | `text`). If this host has no vault-search means, the lane returns `{"question_identity":"<the question's identity>","lane_id":"km_context","hits":[]}`.
 
 This skill has no MCP tool. Configuration is host-local; recall is executed by the parent session with whatever vault-search means the host already exposes.
 
@@ -40,13 +40,15 @@ km:
 
 Endpoint auto-detect, in this order — first hit wins:
 
-1. `km-config.json` (cwd, then `~/.ouroboros/km-config.json`) — use its endpoint/URL field when present
+1. `km-config.json` (cwd, then `~/.claude/km-config.json`) — use its endpoint/URL field when present
 2. `GRAPHRAG_API_URL` environment variable
 3. `http://127.0.0.1:8400`
 
 An explicit `km.endpoint` in `config.yaml` overrides auto-detect. `enabled: false` disables the lane's search; the contracted empty-hits answer still applies.
 
 ## Status
+
+Run `ouroboros config show` and look at the `km` block (endpoint, vault_path).
 
 When the user asks for km status, report the resolved values, not the raw file:
 
@@ -59,11 +61,11 @@ When the user asks for km status, report the resolved values, not the raw file:
 
 Do not claim the vault is reachable from `readyz`/`health` alone. Reachability is a successful search (or a documented empty-hits no-means result).
 
-## Manual recall
+## Manual recall once
 
 When the user supplies a query (or an interview question to recall against):
 
-1. Confirm km is enabled and a search means exists. If not, return `{"lane_id":"km_context","hits":[]}` and stop.
+1. Confirm km is enabled and a search means exists. If not, return `{"question_identity":"<the question's identity>","lane_id":"km_context","hits":[]}` and stop.
 2. Derive 3–7 keywords from the question.
 3. Search with the host's vault-search means (GraphRAG, Obsidian CLI, then text), in that tier order.
 4. Reply with the contracted JSON only — at most 3 hits:
@@ -84,8 +86,6 @@ When the user supplies a query (or an interview question to recall against):
 
 Do not paste note bodies. Do not turn hits into an interview answer.
 
-## Once
-
 `/ouroboros:km "<query>"` is a single recall. Run the Manual recall steps once for that query and stop.
 
 Do **not** start an interview. Do **not** start a PM interview. Do **not** fan out other advisory lanes. Do **not** generate a seed. The output is the contracted `km_context` JSON only.
@@ -95,9 +95,9 @@ Do **not** start an interview. Do **not** start a PM interview. Do **not** fan o
 Disable vault recall in either of these ways:
 
 - Set `km.enabled: false` in `~/.ouroboros/config.yaml`
-- Invoke `/ouroboros:km --off` (writes `enabled: false` and does not search)
+- Invoke `/ouroboros:km --off` — applies to the current session only; nothing is written to disk, and the next session reads `config.yaml` again
 
-While off, a recall still returns `{"lane_id":"km_context","hits":[]}`. Do not enter an interview or PM flow to “turn it back on”.
+While off, a recall still returns `{"question_identity":"<the question's identity>","lane_id":"km_context","hits":[]}`. Do not enter an interview or PM flow to “turn it back on”.
 
 ## RFC #1392 State Breadcrumb Footer
 

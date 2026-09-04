@@ -984,8 +984,10 @@ def _interview_km_hits_answer_contract() -> dict[str, Any]:
             "search with whatever vault-search means the host exposes. Return "
             "at most three hits: path, a one-line summary (max 200 chars), a "
             "numeric score, and the search tier. Do not paste note bodies. "
-            'If this host has no vault-search means, return {"lane_id":'
-            '"km_context","hits":[]}.'
+            'If this host has no vault-search means, return {"question_'
+            'identity":"<the question_identity shown in the Session block>",'
+            '"lane_id":"km_context","hits":[]} — question_identity is '
+            "required even for an empty result."
         ),
     }
 

@@ -270,7 +270,10 @@ def _lane_instructions(
             "answer the question. Extract 3-7 keywords from the question and "
             "search with whatever vault-search means the host exposes. Return "
             "at most the top 3 hits as the contracted JSON only. If this host "
-            'has no vault-search means, return {"lane_id":"km_context","hits":[]}.',
+            'has no vault-search means, return {"question_identity":"<the '
+            'question_identity shown in the Session block>","lane_id":'
+            '"km_context","hits":[]} — question_identity is required even '
+            "for an empty result.",
             "Report paths and one-line summaries only; do not paste note bodies.\n\n"
             "## Answer Contract\n```json\n"
             + contract_json
