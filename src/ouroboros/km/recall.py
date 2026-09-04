@@ -188,6 +188,8 @@ class KMHit:
 
 def extract_query(text: str, max_terms: int = 7) -> str:
     """Return up to ``max_terms`` content tokens from ``text``."""
+    if max_terms <= 0:
+        return ""
     seen: set[str] = set()
     kept: list[str] = []
     for raw in _TOKEN_RE.findall(text or ""):
@@ -352,6 +354,9 @@ class KMRecall:
             )
         except (OSError, subprocess.TimeoutExpired):
             return []
+        # A non-zero exit means the CLI failed even if stdout has text.
+        if completed.returncode != 0:
+            return []
         try:
             payload = json.loads(completed.stdout)
         except json.JSONDecodeError:
@@ -426,6 +431,16 @@ class KMRecall:
         scored.sort(key=lambda hit: hit.score, reverse=True)
         return scored[:top_k]
 
+    @staticmethod
+    def _tier_label(searcher: Callable[[str, int], list[KMHit]], index: int) -> str:
+        """Label a searcher by its own name, falling back to positional names."""
+        name = getattr(searcher, "__name__", "") or ""
+        if name.lstrip("_") in _VALID_TIERS:
+            return name.lstrip("_")
+        if name:
+            return name
+        return _TIER_NAMES[index] if index < len(_TIER_NAMES) else f"searcher_{index}"
+
     def recall(self, text: str) -> list[KMHit]:
         if not self._config.enabled:
             return []
@@ -433,7 +448,7 @@ class KMRecall:
         if not query.strip():
             return []
         for index, searcher in enumerate(self._searchers):
-            tier = _TIER_NAMES[index] if index < len(_TIER_NAMES) else f"searcher_{index}"
+            tier = self._tier_label(searcher, index)
             try:
                 hits = searcher(query, self._config.top_k)
             except Exception as exc:
