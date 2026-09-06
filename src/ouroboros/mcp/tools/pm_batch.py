@@ -386,6 +386,11 @@ _ANSWER_SPECS: dict[str, str] = {
   min, max, rate. `comparator`: eq, neq, gt, gte, lt, lte.
 - `values` is one entry, or one per group when you grouped.
 - You carry aggregates — never a row, a name, or an identifier.""",
+    "km_hits_answer.v1": """- `question_identity` and `lane_id` exactly as given above.
+- `hits`: at most 3 entries of `{path, one_line, score, tier}`.
+- Nothing to recall: `hits: []`.
+- `one_line` max 200 characters. `tier`: graphrag, obsidian_cli, text.
+- Paths and one-line summaries only — never note bodies.""",
 }
 
 
@@ -444,14 +449,20 @@ Your final message is one JSON object and nothing else — no prose around it.
 def _investigation_step(roster: Any, schema_json: str | None) -> str:
     """Return step 3 — where this lane may look when reuse was not enough.
 
-    Which of the two it is comes from the lane's own answer shape rather than
-    its name: a lane whose answer carries ``repo_id`` is bounded by the roster,
-    and one that carries none measures what the host exposes. The roster
-    travels with the request, so a lane that cannot cite a repository must not
-    be handed one — it would be told to read what it has no way to report.
+    Which step it is comes from the lane's own answer shape rather than its
+    name: a lane whose answer carries ``repo_id`` is bounded by the roster, one
+    whose answer carries ``hits`` searches the knowledge vault, and one that
+    carries neither measures what the host exposes. The roster travels with the
+    request, so a lane that cannot cite a repository must not be handed one —
+    it would be told to read what it has no way to report.
     """
     cites_repos = bool(schema_json) and '"repo_id"' in (schema_json or "")
+    cites_hits = bool(schema_json) and '"hits"' in (schema_json or "")
     entries = [e for e in roster if isinstance(e, dict) and e.get("repo_id")] if roster else []
+    if cites_hits:
+        return """3. **Only if 2 turned up nothing that bears on this question**, search
+   this host's knowledge vault for notes that may already answer it. If this
+   host has no vault-search means, return empty hits and stop."""
     if not cites_repos:
         return """3. **Only if 2 turned up nothing that bears on this question**, find and call
    the data tools this host exposes. An empty tool search is where you start,

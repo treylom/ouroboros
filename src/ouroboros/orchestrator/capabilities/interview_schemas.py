@@ -933,6 +933,65 @@ def interview_data_evidence_answer_contract() -> dict[str, Any]:
     return _interview_data_evidence_answer_contract()
 
 
+def _interview_km_hits_answer_contract() -> dict[str, Any]:
+    """Return the answer contract for the ``km_context`` advisory lane.
+
+    Separate from the ``data_context`` measurement contract. This lane reports
+    vault-note paths and one-line summaries only — never aggregates, never
+    note bodies. An empty ``hits`` list is a complete answer: the host has no
+    vault-search means, or nothing ranked in the top three.
+    """
+    identity_property: dict[str, Any] = {
+        "type": "string",
+        "pattern": r"^(interview|pm)-question:[0-9a-f]{16}$",
+        "description": "Matches the originating advisory request.",
+    }
+    hits_item: dict[str, Any] = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["path", "one_line", "score", "tier"],
+        "properties": {
+            "path": {"type": "string", "minLength": 1},
+            "one_line": {"type": "string", "maxLength": 200},
+            "score": {"type": "number"},
+            "tier": {
+                "type": "string",
+                "enum": ["graphrag", "obsidian_cli", "text"],
+            },
+        },
+    }
+    answer_schema: dict[str, Any] = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["question_identity", "lane_id", "hits"],
+        "properties": {
+            "question_identity": identity_property,
+            "lane_id": {"const": "km_context"},
+            "hits": {
+                "type": "array",
+                "maxItems": 3,
+                "items": hits_item,
+            },
+        },
+    }
+    return {
+        "contract_id": "km_hits_answer.v1",
+        "scope": "single_interview_question_km_hits",
+        "response_model_schema": answer_schema,
+        "runtime_instruction": (
+            "Search this host's knowledge vault for notes that may already "
+            "answer the question. Extract 3-7 keywords from the question and "
+            "search with whatever vault-search means the host exposes. Return "
+            "at most three hits: path, a one-line summary (max 200 chars), a "
+            "numeric score, and the search tier. Do not paste note bodies. "
+            'If this host has no vault-search means, return {"question_'
+            'identity":"<the question_identity shown in the Session block>",'
+            '"lane_id":"km_context","hits":[]} — question_identity is '
+            "required even for an empty result."
+        ),
+    }
+
+
 def _code_investigation_repo_inspection_tool_capabilities() -> tuple[dict[str, Any], ...]:
     """Return concrete repo-inspection tool capabilities for code-fact subagents."""
     tool_schemas: Mapping[str, Mapping[str, Any]] = {
@@ -1146,7 +1205,13 @@ def _interview_question_advisory_request_schema() -> dict[str, Any]:
                 "minItems": 1,
                 "items": {
                     "type": "string",
-                    "enum": ["inspect_code", "web_research", "run_lateral_review", "read_data"],
+                    "enum": [
+                        "inspect_code",
+                        "web_research",
+                        "run_lateral_review",
+                        "read_data",
+                        "recall_knowledge",
+                    ],
                 },
             },
             "lanes": {
@@ -1163,6 +1228,7 @@ def _interview_question_advisory_request_schema() -> dict[str, Any]:
                                 "code_context",
                                 "web_context",
                                 "data_context",
+                                "km_context",
                                 "ambiguity_contrarian",
                                 "answer_simplifier",
                                 "architecture_implications",
@@ -1176,6 +1242,7 @@ def _interview_question_advisory_request_schema() -> dict[str, Any]:
                                 "web_research",
                                 "run_lateral_review",
                                 "read_data",
+                                "recall_knowledge",
                             ],
                         },
                         "persona": {
@@ -1292,6 +1359,16 @@ def _interview_question_advisory_fanout_metadata() -> dict[str, Any]:
             "answer_contract": _interview_data_evidence_answer_contract(),
         },
         {
+            "lane_id": "km_context",
+            "purpose": (
+                "Recall existing notes from the user's knowledge vault that may "
+                "already answer this question; report paths and one-line summaries only."
+            ),
+            "capability": "recall_knowledge",
+            "required": False,
+            "answer_contract": _interview_km_hits_answer_contract(),
+        },
+        {
             "lane_id": "ambiguity_contrarian",
             "purpose": "Name hidden assumptions, missing decisions, and risky vague words.",
             "capability": "run_lateral_review",
@@ -1335,6 +1412,7 @@ def _interview_question_advisory_fanout_metadata() -> dict[str, Any]:
             "web_research",
             "run_lateral_review",
             "read_data",
+            "recall_knowledge",
         ],
         "question_heading": "## Interview Question",
         # Carried whole rather than composed from parts: this paragraph states
@@ -1398,6 +1476,7 @@ __all__ = [
     "_interview_code_investigation_request_schema",
     "_interview_data_evidence_answer_contract",
     "_interview_data_read_request_schema",
+    "_interview_km_hits_answer_contract",
     "_interview_question_advisory_fanout_metadata",
     "_interview_question_advisory_request_schema",
     "interview_code_investigation_answer_contract",

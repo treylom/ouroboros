@@ -258,7 +258,7 @@ def test_a_caller_with_no_store_still_gets_its_lanes(roster: list[dict[str, str]
     """Advisory: losing the shortcut costs a child a place to look, not a turn."""
     prompts = _lane_prompts(_attach(roster, None))
 
-    assert set(prompts) == {"code_context", "data_context"}
+    assert set(prompts) == {"code_context", "data_context", "km_context"}
     for prompt in prompts.values():
         assert "## Recently Found Here" not in prompt
 

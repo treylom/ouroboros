@@ -265,11 +265,13 @@ async def test_handler_surfaces_runnable_lateral_review_dispatch() -> None:
         "web_research",
         "run_lateral_review",
         "read_data",
+        "recall_knowledge",
     ]
     assert {lane["lane_id"] for lane in advisory["lanes"]} == {
         "code_context",
         "web_context",
         "data_context",
+        "km_context",
         "ambiguity_contrarian",
         "answer_simplifier",
         "architecture_implications",
@@ -280,6 +282,7 @@ async def test_handler_surfaces_runnable_lateral_review_dispatch() -> None:
         "code_context",
         "web_context",
         "data_context",
+        "km_context",
         "ambiguity_contrarian",
         "answer_simplifier",
         "architecture_implications",
