@@ -36,6 +36,7 @@ from ouroboros.interview_adapters import (
     next_unresolved_reference,
     select_glossary_injection,
 )
+from ouroboros.km import KMRecall, extract_query, render_label
 from ouroboros.providers.base import (
     CompletionConfig,
     LLMAdapter,
@@ -714,6 +715,46 @@ class PreparedInterviewQuestion:
     preserve_prefix_messages: int = 0
 
 
+def _latest_user_answer(state: InterviewState) -> str:
+    """Return the most recent non-empty user answer, or empty."""
+    for rnd in reversed(state.rounds):
+        if rnd.user_response:
+            return rnd.user_response
+    return ""
+
+
+def _km_data_label(
+    text: str,
+    *,
+    km_recall: KMRecall | None = None,
+    max_label_chars: int | None = None,
+) -> str:
+    """Return a data-only recall label, or empty on any failure."""
+    try:
+        from ouroboros.config.loader import load_config
+
+        recaller = km_recall
+        cap = max_label_chars
+        if recaller is None:
+            cfg = load_config().km
+            if not cfg.enabled:
+                return ""
+            if cap is None:
+                cap = cfg.max_label_chars
+            recaller = KMRecall(cfg)
+        elif cap is None:
+            stored = getattr(recaller, "_config", None)
+            if stored is not None:
+                cap = stored.max_label_chars
+            else:
+                cap = load_config().km.max_label_chars
+        hits = recaller.recall(text)
+        query = extract_query(text) or text
+        return render_label(query, hits, max_chars=cap)
+    except Exception:
+        return ""
+
+
 @dataclass
 class InterviewEngine:
     """Engine for conducting interactive requirement interviews.
@@ -1266,6 +1307,7 @@ class InterviewEngine:
         state: InterviewState,
         initial_context: str | None = None,
         max_chars: int | None = None,
+        km_recall: KMRecall | None = None,
     ) -> str:
         """Build the system prompt for question generation.
 
@@ -1275,13 +1317,17 @@ class InterviewEngine:
                 ``state.initial_context``.
             max_chars: Optional cap for the returned system prompt. When omitted,
                 uses the standard system-prompt cap.
+            km_recall: Optional recall stack for tests. ``None`` loads config
+                and omits the label when loading or recall fails.
 
         Returns:
             The system prompt.
         """
         from ouroboros.agents.loader import load_agent_prompt
 
-        max_prompt_chars = max_chars or self._MAX_SYSTEM_PROMPT_CHARS
+        designed_cap = type(self)._MAX_SYSTEM_PROMPT_CHARS
+        caller_cap = max_chars if max_chars is not None else self._MAX_SYSTEM_PROMPT_CHARS
+        max_prompt_chars = min(caller_cap, designed_cap)
         effective_round_number = self._next_conversation_round_number(state)
         round_info = f"Round {effective_round_number}"
 
@@ -1380,6 +1426,19 @@ class InterviewEngine:
         # Hard-truncate as final safety net
         if len(full_prompt) > max_prompt_chars:
             full_prompt = full_prompt[:max_prompt_chars]
+
+        recall_input = " ".join(
+            part
+            for part in (prompt_initial_context, _latest_user_answer(state))
+            if part
+        )
+        label = _km_data_label(recall_input, km_recall=km_recall)
+        extra = len(label) + 1 if label else 0
+        if label and len(full_prompt) + extra <= caller_cap:
+            marker = f"Initial context: {prompt_initial_context}\n"
+            injected = full_prompt.replace(marker, f"{marker}{label}\n", 1)
+            if len(injected) == len(full_prompt) + extra:
+                full_prompt = injected
 
         return full_prompt
 

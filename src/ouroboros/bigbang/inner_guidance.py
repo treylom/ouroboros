@@ -27,6 +27,7 @@ from dataclasses import dataclass
 import re
 
 from ouroboros.bigbang.interview import InterviewEngine, InterviewState
+from ouroboros.km import KMRecall
 
 
 @dataclass(frozen=True)
@@ -240,6 +241,7 @@ def compose_steered_prompt(
     initial_context: str | None = None,
     max_chars: int | None = None,
     shed_last_marker: str | None = None,
+    km_recall: KMRecall | None = None,
 ) -> str:
     """Compose ``steering`` above an inner system prompt, interview-first.
 
@@ -268,6 +270,8 @@ def compose_steered_prompt(
         max_chars: Optional cap; defaults to the widened engine cap.
         shed_last_marker: Substring identifying the steering paragraph that
             carries the wrapper's core policy; it outlives the others.
+        km_recall: Optional recall stack forwarded to ``build``. ``None``
+            lets the inner builder load config or omit the label.
 
     Returns:
         The composed system prompt, never longer than the effective cap.
@@ -279,10 +283,20 @@ def compose_steered_prompt(
     baseline_cap = min(inner_cls._MAX_SYSTEM_PROMPT_CHARS, cap)
 
     if inner_budget >= baseline_cap:
-        base = build(state, initial_context=initial_context, max_chars=inner_budget)
+        base = build(
+            state,
+            initial_context=initial_context,
+            max_chars=inner_budget,
+            km_recall=km_recall,
+        )
         return steering_block + base
 
-    baseline = build(state, initial_context=initial_context, max_chars=baseline_cap)
+    baseline = build(
+        state,
+        initial_context=initial_context,
+        max_chars=baseline_cap,
+        km_recall=km_recall,
+    )
     # The effective context may be a caller-supplied override (e.g. the
     # prompt-safe summary for oversized contexts) that state-based
     # invariants cannot see; protect it under the same baseline filter.
@@ -295,7 +309,12 @@ def compose_steered_prompt(
     )
 
     if inner_budget >= inner_cls._MIN_SYSTEM_PROMPT_CHARS:
-        base = build(state, initial_context=initial_context, max_chars=inner_budget)
+        base = build(
+            state,
+            initial_context=initial_context,
+            max_chars=inner_budget,
+            km_recall=km_recall,
+        )
         if all(marker in base for marker in required_markers):
             return steering_block + base
 
@@ -309,7 +328,12 @@ def compose_steered_prompt(
         # "use the default cap", which would blow the budget again.
         inner_budget = max(1, cap - len(steering_block))
         base = (
-            build(state, initial_context=initial_context, max_chars=inner_budget)
+            build(
+                state,
+                initial_context=initial_context,
+                max_chars=inner_budget,
+                km_recall=km_recall,
+            )
             if steering_block
             else baseline
         )
