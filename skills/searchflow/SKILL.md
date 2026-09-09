@@ -297,6 +297,8 @@ bash scripts/preflight.sh --json   # stdout JSON 1줄 · exit 0 고정(번들 �
 
 `--no-install`(=`SEARCHFLOW_PREFLIGHT_INSTALL=0`) 은 점검만 하고, `SEARCHFLOW_PREFLIGHT_ENHANCED=0` 은 강화 요소 설치를 생략하며, `SEARCHFLOW_NODE` 는 실행기를 수동 지정한다. codex 등록 대상은 `~/.codex/config.toml` 이고, `CODEX_HOME` 이 설정돼 있으면 그 아래 `config.toml` 이다.
 
+**우로보로스 미가용 층의 폴백(2026-09-01 PM 인터뷰 결정, 13-pm-document.md Success Criteria #17)**: `mcp=skipped-no-host`·`register-failed`·`unknown-host-timeout` 등으로 이 MCP 서버 자체를 등록·호출할 수 없는 봇/층(VM·core 등)은 ① 담당 봇(리드)이 우로보로스를 대행해 셀프 인터뷰 되묻기를 직접 수행하거나, ② 우로보로스 가용한 다른 봇(예: 스트레인지)에게 인터뷰만 위임할 수 있다. 참고: Codex CLI 는 `~/.codex/config.toml`의 `[mcp_servers.ouroboros]`로 등록되며, Codex 측 `[plugins.\"…\"]` 블록에는 ouroboros 항목이 없다 — 「Codex 는 우로보로스를 플러그인으로 부른다」는 재경님 전제는 부정확하다(정확히는 MCP 서버 등록).
+
 상태 폴더를 tmp 로 강등할 때 이름은 preflight 가 `searchflow`, MCP 서버가 `searchflow-sessions` 로 다르다 — 무해하다(같은 `TMPDIR` 아래 형제 디렉터리).
 
 ### 5.2 권한
