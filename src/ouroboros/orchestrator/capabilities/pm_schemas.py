@@ -67,6 +67,7 @@ from typing import Any
 
 from ouroboros.orchestrator.capabilities.interview_schemas import (
     _interview_data_evidence_answer_contract,
+    _interview_km_hits_answer_contract,
 )
 from ouroboros.orchestrator.capabilities.question_text import normalize_question_text
 
@@ -480,6 +481,16 @@ def _pm_question_advisory_fanout_metadata() -> dict[str, Any]:
             # are statements about the lane rather than about the host.
             "answer_contract": _interview_data_evidence_answer_contract(),
         },
+        {
+            "lane_id": "km_context",
+            "purpose": (
+                "Recall existing notes from the user's knowledge vault that may "
+                "already answer this question; report paths and one-line summaries only."
+            ),
+            "capability": "recall_knowledge",
+            "required": False,
+            "answer_contract": _interview_km_hits_answer_contract(),
+        },
     ]
     return {
         "contract_id": "pm_question_advisory_fanout.v1",
@@ -487,7 +498,7 @@ def _pm_question_advisory_fanout_metadata() -> dict[str, Any]:
         "question_identity_prefix": "pm-question",
         "advisory_goal": "put_evidence_beside_the_pm_question",
         "payload_title_prefix": "PM advisory",
-        "allowed_capabilities": ["inspect_code", "read_data"],
+        "allowed_capabilities": ["inspect_code", "read_data", "recall_knowledge"],
         "question_heading": "## PM Question",
         # The counterpart of the interview's, and the sentence that differs: no
         # quality of evidence lets a finding here stand in for the user.

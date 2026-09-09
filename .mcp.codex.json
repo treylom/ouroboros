@@ -16,6 +16,13 @@
         "--llm-backend",
         "codex"
       ]
+    },
+    "searchflow": {
+      "command": "node",
+      "cwd": "./",
+      "args": [
+        "./skills/searchflow/scripts/mcp-server.mjs"
+      ]
     }
   }
 }

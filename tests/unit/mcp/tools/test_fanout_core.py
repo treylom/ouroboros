@@ -511,10 +511,10 @@ def _emitted_advisory_contract(
 def _advisory_lane_outputs(meta: Mapping[str, Any], lane_keys: list[str]) -> dict[str, Any]:
     """Return one contract-satisfying output per emitted lane.
 
-    Only ``data_context`` carries an answer contract, and it is satisfied here
-    with its no-op answer — the response a child gives when the question's
-    honest answer is not a measurement. Every other lane completes on the
-    generic advisory shape, so a plain string stands in for its advice.
+    Contracted lanes are satisfied here with a valid no-op: ``data_context``
+    when the question is not a measurement, ``km_context`` when nothing is
+    recalled. Every other lane completes on the generic advisory shape, so a
+    plain string stands in for its advice.
     """
     identity = ""
     for payload in meta["question_advisory_subagents"]:
@@ -529,6 +529,12 @@ def _advisory_lane_outputs(meta: Mapping[str, Any], lane_keys: list[str]) -> dic
             "data_needed": False,
             "read_requests": [],
             "no_evidence_reason": "not_a_measurement",
+        }
+    if "km_context" in outputs:
+        outputs["km_context"] = {
+            "question_identity": identity,
+            "lane_id": "km_context",
+            "hits": [],
         }
     return outputs
 
