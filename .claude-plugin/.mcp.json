@@ -7,7 +7,7 @@
         "--python",
         ">=3.12",
         "--from",
-        "ouroboros-ai[mcp]==0.54.1",
+        "git+https://github.com/treylom/ouroboros.git@km-v1[mcp]",
         "ouroboros",
         "mcp",
         "serve",
@@ -15,12 +15,6 @@
         "claude-cli",
         "--llm-backend",
         "claude_code"
-      ]
-    },
-    "searchflow": {
-      "command": "node",
-      "args": [
-        "${CLAUDE_PLUGIN_ROOT}/skills/searchflow/scripts/mcp-server.mjs"
       ]
     }
   }
