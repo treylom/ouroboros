@@ -21,6 +21,26 @@ pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="the probe is PO
 
 
 class TestMakeStdinPeerProbe:
+    @pytest.mark.parametrize("state", ["idle", "queued", "closed"])
+    def test_probe_preserves_reader_blocking_mode(self, state: str) -> None:
+        ours, theirs = socket.socketpair()
+        try:
+            assert os.get_blocking(ours.fileno()) is True
+            probe = mcp_module._make_stdin_peer_probe(ours.fileno())
+            assert probe is not None
+            assert os.get_blocking(ours.fileno()) is True
+            if state == "queued":
+                theirs.sendall(b"protocol\n")
+            elif state == "closed":
+                theirs.close()
+            assert probe() is (state == "closed")
+            assert os.get_blocking(ours.fileno()) is True
+            if state == "queued":
+                assert ours.recv(9) == b"protocol\n"
+        finally:
+            ours.close()
+            theirs.close()
+
     def test_live_peer_reports_alive(self) -> None:
         ours, theirs = socket.socketpair()
         try:
