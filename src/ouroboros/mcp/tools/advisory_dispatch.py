@@ -184,6 +184,39 @@ def append_question_advisory_dispatch(response_text: str, meta: dict[str, Any]) 
             "Submit results with `ouroboros_submit_fanout_results` "
             f"(`fanout_id`: `{fanout_id}`, `correlation_key`: `{correlation_key}`).",
         ]
+        session_id = meta.get("session_id") or "<session_id>"
+        example = {
+            "fanout_id": str(fanout_id),
+            "correlation_key": correlation_key,
+            "session_id": str(session_id),
+            "results": [
+                {
+                    "key": "code_context",
+                    "content": {
+                        "question_identity": "<qid>",
+                        "lane_id": "code_context",
+                        "examined": [],
+                    },
+                },
+                {
+                    "key": "km_context",
+                    "content": {
+                        "question_identity": "<qid>",
+                        "lane_id": "km_context",
+                        "hits": [],
+                    },
+                },
+                {"key": "data_context", "undispatched": True},
+            ],
+        }
+        lines += [
+            "",
+            "Example submission (one entry per lane; `content` = that lane's "
+            "JSON answer verbatim; a lane you could not run = `undispatched`):",
+            "```json",
+            json.dumps(example, ensure_ascii=False),
+            "```",
+        ]
 
     lines += ["", "```json", json.dumps(payloads, ensure_ascii=False), "```"]
     return "\n".join(lines)

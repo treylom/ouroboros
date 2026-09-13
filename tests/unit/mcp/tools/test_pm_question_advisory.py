@@ -17,6 +17,7 @@ import pytest
 
 from ouroboros.bigbang.interview import InterviewRound, InterviewState
 from ouroboros.core.types import Result as CoreResult
+from ouroboros.mcp.tools.advisory_dispatch import append_question_advisory_dispatch
 from ouroboros.mcp.tools.fanout import (
     FANOUT_KIND_QUESTION_ADVISORY,
     FanoutRegistry,
@@ -1278,3 +1279,32 @@ def test_no_constant_names_a_synthetic_round_any_more() -> None:
     import ouroboros.orchestrator.capabilities.pm_schemas as pm_schemas
 
     assert [name for name in dir(pm_schemas) if "EVIDENCE_ROUND" in name] == []
+
+
+def test_dispatch_directive_includes_an_example_submission_with_the_fanout_id(
+    roster: list[dict[str, str]],
+    registry: FanoutRegistry,
+) -> None:
+    """The host directive carries a worked JSON example, not just prose rules
+
+    — one keyed by this turn's own ``fanout_id`` so a host reading it can
+    submit by pattern rather than reverse-engineering the schema from scratch.
+    """
+    meta = _attach(registry, roster)
+    fanout_id = meta["question_advisory_fanout_id"]
+
+    rendered = append_question_advisory_dispatch("The question text.", meta)
+
+    assert "Example submission" in rendered
+    example_block = rendered.split("Example submission", 1)[1]
+    assert f'"fanout_id": "{fanout_id}"' in example_block
+    assert '"km_context"' in example_block
+    assert '"undispatched": true' in example_block
+
+
+def test_dispatch_directive_has_no_example_without_a_fanout_id() -> None:
+    """No fanout, no lanes attached — nothing to key an example submission to."""
+    meta: dict[str, Any] = {}
+    rendered = append_question_advisory_dispatch("The question text.", meta)
+    assert rendered == "The question text."
+    assert "Example submission" not in rendered

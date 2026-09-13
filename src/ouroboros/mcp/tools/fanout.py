@@ -44,8 +44,8 @@ re-exports for its existing importers.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, replace
 import json
 from pathlib import Path
 import re
@@ -109,6 +109,8 @@ class FanoutRecord:
     synthesizer_input: dict[str, Any]
     required_keys: tuple[str, ...] | None = None
     question_identity: str = ""
+    submitted_keys: tuple[str, ...] | None = None
+    undispatched_keys: tuple[str, ...] | None = None
 
     def gating_keys(self) -> tuple[str, ...]:
         """Return the keys whose absence blocks completion."""
@@ -136,6 +138,10 @@ class FanoutRecord:
             data["required_keys"] = list(self.required_keys)
         if self.question_identity:
             data["question_identity"] = self.question_identity
+        if self.submitted_keys is not None:
+            data["submitted_keys"] = list(self.submitted_keys)
+        if self.undispatched_keys is not None:
+            data["undispatched_keys"] = list(self.undispatched_keys)
         return data
 
     @classmethod
@@ -155,6 +161,16 @@ class FanoutRecord:
                 else None
             ),
             question_identity=str(data.get("question_identity") or ""),
+            submitted_keys=(
+                tuple(str(key) for key in data.get("submitted_keys"))
+                if isinstance(data.get("submitted_keys"), (list, tuple))
+                else None
+            ),
+            undispatched_keys=(
+                tuple(str(key) for key in data.get("undispatched_keys"))
+                if isinstance(data.get("undispatched_keys"), (list, tuple))
+                else None
+            ),
         )
 
 
@@ -330,6 +346,102 @@ class FanoutRegistry:
             return FanoutRecord.from_dict(data)
         except (KeyError, TypeError, ValueError):
             return None
+
+    def mark_submission(
+        self,
+        fanout_id: str,
+        *,
+        submitted_keys: Iterable[str],
+        undispatched_keys: Iterable[str],
+    ) -> bool:
+        """Record which lanes this fan-out actually received, or ``False``.
+
+        Fail-open: a record that has vanished or a directory that cannot be
+        written is logged and reported as ``False`` rather than raised, because
+        this bookkeeping is advisory (a later-round warning), not a gate on the
+        submission it accompanies.
+        """
+        path = self._path(fanout_id)
+        record = self.load(fanout_id)
+        if path is None or record is None:
+            log.warning("fanout.registry.mark_submission_failed", fanout_id=fanout_id)
+            return False
+        updated = replace(
+            record,
+            submitted_keys=tuple(submitted_keys),
+            undispatched_keys=tuple(undispatched_keys),
+        )
+        try:
+            persisted = write_owner_only(
+                path, json.dumps(updated.to_dict(), ensure_ascii=False)
+            )
+        except OSError as exc:
+            log.warning(
+                "fanout.registry.mark_submission_failed",
+                fanout_id=fanout_id,
+                error=str(exc),
+            )
+            return False
+        if not persisted:
+            log.warning("fanout.registry.mark_submission_failed", fanout_id=fanout_id)
+            return False
+        return True
+
+    def session_records(self, session_id: str) -> list[FanoutRecord]:
+        """Return this session's fan-out records, oldest first.
+
+        Broken files are skipped rather than raised: a record this method
+        cannot parse is one ``load`` already treats as absent, and the tally
+        this feeds (``lane_submission_tally``) is advisory, not a gate.
+        """
+        if not self._dir.exists():
+            return []
+        paths = sorted(self._dir.glob("*.json"), key=lambda p: p.stat().st_mtime)
+        records: list[FanoutRecord] = []
+        for path in paths:
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(data, Mapping):
+                continue
+            try:
+                record = FanoutRecord.from_dict(data)
+            except (KeyError, TypeError, ValueError):
+                continue
+            if record.session_id == session_id:
+                records.append(record)
+        return records
+
+
+def lane_submission_tally(
+    registry: FanoutRegistry,
+    session_id: str,
+    lane_id: str,
+    *,
+    exclude_fanout_id: str | Iterable[str] | None = None,
+) -> tuple[int, int]:
+    """Return (missing, total): fan-outs of this session that expected ``lane_id``
+    and how many of them never received it (neither submitted nor undispatched)."""
+    total = 0
+    missing = 0
+    if exclude_fanout_id is None:
+        excluded: frozenset[str] = frozenset()
+    elif isinstance(exclude_fanout_id, str):
+        excluded = frozenset({exclude_fanout_id})
+    else:
+        excluded = frozenset(str(item) for item in exclude_fanout_id if item)
+    for record in registry.session_records(session_id):
+        if record.fanout_id in excluded:
+            continue
+        if lane_id not in record.expected_keys:
+            continue
+        total += 1
+        submitted = record.submitted_keys or ()
+        undispatched = record.undispatched_keys or ()
+        if record.submitted_keys is None or lane_id not in (*submitted, *undispatched):
+            missing += 1
+    return (missing, total)
 
 
 def _fanout_identity_synthesis(aggregated_outputs: list[Mapping[str, Any]]) -> dict[str, Any]:
@@ -888,6 +1000,10 @@ def prepare_fanout_results(
     for key in contract_violations:
         provided.pop(key, None)
 
+    registry.mark_submission(
+        fanout_id, submitted_keys=sorted(provided), undispatched_keys=list(undispatched)
+    )
+
     missing_required = [
         key for key in record.gating_keys() if key not in provided and key not in undispatched
     ]
@@ -934,8 +1050,18 @@ def prepare_fanout_results(
             "kind": record.kind,
             "error": f"No synthesizer is registered for fan-out kind={record.kind!r}.",
         }
+    # Strip the submission-tracking fields before handing the record on: a
+    # replayed identical submission must hash identically for
+    # ``_fanout_synthesis_contract_id`` (fanout_handler.py), and
+    # ``mark_submission`` above just wrote this fan-out's own submitted/
+    # undispatched keys to disk -- a value that changes between an
+    # identical call's first and second run for a reason unrelated to what
+    # was submitted. Neither field is read past this point (synthesis keys
+    # off ``kind``/``synthesizer_input``/``correlation_key``), so the strip
+    # costs nothing downstream.
+    synthesis_record = replace(record, submitted_keys=None, undispatched_keys=None)
     return PreparedFanoutSynthesis(
-        record=record,
+        record=synthesis_record,
         fanout_id=fanout_id,
         provided=provided,
         completion_report=completion_report,

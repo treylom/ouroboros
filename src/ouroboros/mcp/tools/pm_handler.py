@@ -19,6 +19,7 @@ ambiguity scoring.  User controls when to stop.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 import json
 import os
@@ -53,7 +54,7 @@ from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.host_context import resolve_request_subagent_dispatch
 from ouroboros.mcp.tools.advisory_dispatch import append_question_advisory_dispatch
-from ouroboros.mcp.tools.fanout import FanoutRegistry
+from ouroboros.mcp.tools.fanout import FanoutRegistry, lane_submission_tally
 from ouroboros.mcp.tools.pm_batch import (
     batch_entries_for_turns,
     batch_turn_meta_and_text,
@@ -260,6 +261,43 @@ def _last_classification(engine: PMInterviewEngine) -> str | None:
     Delegates to ``engine.get_last_classification()``.
     """
     return engine.get_last_classification()
+
+
+def _km_lane_warning(
+    registry: FanoutRegistry | None,
+    session_id: str,
+    meta: dict[str, Any] | Iterable[dict[str, Any]],
+) -> str:
+    """Return a warning line if a prior round's km_context lane went unsubmitted.
+
+    Fail-open: any registry error yields "" rather than raising, because this
+    warning is advisory and must never block the next question from reaching
+    the user.
+    """
+    if registry is None:
+        return ""
+    envelopes = [meta] if isinstance(meta, dict) else list(meta)
+    current_ids = [
+        str(env.get("question_advisory_fanout_id"))
+        for env in envelopes
+        if isinstance(env, dict) and env.get("question_advisory_fanout_id")
+    ]
+    try:
+        missing, total = lane_submission_tally(
+            registry,
+            session_id,
+            "km_context",
+            exclude_fanout_id=current_ids,
+        )
+    except Exception:
+        return ""
+    if total == 0 or missing == 0:
+        return ""
+    return (
+        f"⚠ km_context 미제출 {missing}/{total} (km_context unsubmitted) — 이전 라운드의 "
+        "km 레인(지식 볼트 검색) 결과가 제출되지 않았습니다. 이번 라운드는 km_context도 "
+        "`ouroboros_submit_fanout_results`로 함께 제출하세요."
+    )
 
 
 def _format_pm_transcript(state: InterviewState, *, withhold_observations: bool = False) -> str:
@@ -1655,6 +1693,9 @@ class PMInterviewHandler:
                 pending_reframe=engine.get_pending_reframe(),
                 diff=diff,
             )
+            warning = _km_lane_warning(self.fanout_registry, session_id, advisories)
+            if warning:
+                response_text += f"\n\n{warning}"
             for envelope in advisories:
                 response_text = append_question_advisory_dispatch(response_text, envelope)
 
@@ -1722,6 +1763,9 @@ class PMInterviewHandler:
 
         # Build response text — include skip hint when applicable
         response_text = f"Session {session_id}\n\n{question}"
+        warning = _km_lane_warning(self.fanout_registry, session_id, response_meta)
+        if warning:
+            response_text += f"\n\n{warning}"
         response_text += skip_hint_suffix(classification, session_id)
 
         return Result.ok(

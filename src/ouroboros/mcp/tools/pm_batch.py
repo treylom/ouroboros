@@ -33,6 +33,7 @@ from ouroboros.bigbang.pm_interview import (
 from ouroboros.core.errors import ValidationError
 from ouroboros.core.security import InputValidator
 from ouroboros.core.types import Result
+from ouroboros.mcp.tools.question_advisory import km_search_directive
 from ouroboros.orchestrator.capabilities.question_text import normalize_question_text
 
 log = structlog.get_logger()
@@ -446,7 +447,7 @@ Your final message is one JSON object and nothing else — no prose around it.
 """
 
 
-def _investigation_step(roster: Any, schema_json: str | None) -> str:
+def _investigation_step(roster: Any, schema_json: str | None, question: str | None = None) -> str:
     """Return step 3 — where this lane may look when reuse was not enough.
 
     Which step it is comes from the lane's own answer shape rather than its
@@ -460,9 +461,11 @@ def _investigation_step(roster: Any, schema_json: str | None) -> str:
     cites_hits = bool(schema_json) and '"hits"' in (schema_json or "")
     entries = [e for e in roster if isinstance(e, dict) and e.get("repo_id")] if roster else []
     if cites_hits:
-        return """3. **Only if 2 turned up nothing that bears on this question**, search
-   this host's knowledge vault for notes that may already answer it. If this
-   host has no vault-search means, return empty hits and stop."""
+        directive = km_search_directive(question).replace("\n", "\n   ")
+        return (
+            "3. **Only if 2 turned up nothing that bears on this question**, "
+            "search this host's knowledge vault.\n   " + directive
+        )
     if not cites_repos:
         return """3. **Only if 2 turned up nothing that bears on this question**, find and call
    the data tools this host exposes. An empty tool search is where you start,
@@ -528,7 +531,7 @@ gather evidence the PM reads before deciding; you never decide for them.
 1. **Does this question need this lane?** If not, answer the empty state
    below and stop — do not investigate to prove it.
 {reuse}
-{_investigation_step(roster, schema_json)}
+{_investigation_step(roster, schema_json, context.get("question"))}
 
 {answer_section}Describe, never prescribe. If two sources disagree, carry both — that
 disagreement is the finding.

@@ -29,6 +29,7 @@ from ouroboros.mcp.tools.evaluation_handlers import (
     LateralThinkHandler,
     SubmitFanoutResultsHandler,
 )
+from ouroboros.mcp.tools.pm_handler import _km_lane_warning
 from ouroboros.mcp.tools.subagent import (
     FANOUT_KIND_CODE_INVESTIGATION,
     FANOUT_KIND_LATERAL_PERSONA_PANEL,
@@ -1285,3 +1286,173 @@ def test_distinct_correlation_keys_still_complete(tmp_path: Any) -> None:
     )
 
     assert out["status"] == "complete"
+
+
+# --------------------------------------------------------------------------- #
+# km_context submission tracking (L-D-ouroboros-pm-km-autorun-fix-1, worker A)
+# --------------------------------------------------------------------------- #
+
+
+def test_mark_submission_round_trips_and_is_additive(tmp_path: Any) -> None:
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = registry.register(
+        kind=FANOUT_KIND_QUESTION_ADVISORY,
+        session_id="s1",
+        correlation_key="context.lane_id",
+        expected_keys=["code_context", "km_context"],
+        synthesizer_input={},
+    )
+    before = registry.load(fanout_id)
+    assert "submitted_keys" not in before.to_dict()
+    assert "undispatched_keys" not in before.to_dict()
+
+    ok = registry.mark_submission(
+        fanout_id, submitted_keys=["code_context"], undispatched_keys=["km_context"]
+    )
+    assert ok is True
+
+    after = registry.load(fanout_id)
+    assert after.submitted_keys == ("code_context",)
+    assert after.undispatched_keys == ("km_context",)
+
+
+def test_mark_submission_unknown_fanout_id_is_false_not_raised(tmp_path: Any) -> None:
+    registry = FanoutRegistry(tmp_path)
+    assert (
+        registry.mark_submission("nope", submitted_keys=[], undispatched_keys=[]) is False
+    )
+
+
+def test_session_records_scopes_by_session(tmp_path: Any) -> None:
+    registry = FanoutRegistry(tmp_path)
+    for session_id in ("s1", "s1", "s2", "s2"):
+        registry.register(
+            kind=FANOUT_KIND_QUESTION_ADVISORY,
+            session_id=session_id,
+            correlation_key="context.lane_id",
+            expected_keys=["km_context"],
+            synthesizer_input={},
+        )
+
+    assert len(registry.session_records("s1")) == 2
+    assert len(registry.session_records("s2")) == 2
+    assert registry.session_records("s3") == []
+
+
+def test_lane_submission_tally_counts_missing_and_excludes_current(tmp_path: Any) -> None:
+    registry = FanoutRegistry(tmp_path)
+    submitted_id = registry.register(
+        kind=FANOUT_KIND_QUESTION_ADVISORY,
+        session_id="s1",
+        correlation_key="context.lane_id",
+        expected_keys=["km_context"],
+        synthesizer_input={},
+    )
+    registry.mark_submission(submitted_id, submitted_keys=["km_context"], undispatched_keys=[])
+
+    undispatched_id = registry.register(
+        kind=FANOUT_KIND_QUESTION_ADVISORY,
+        session_id="s1",
+        correlation_key="context.lane_id",
+        expected_keys=["km_context"],
+        synthesizer_input={},
+    )
+    registry.mark_submission(undispatched_id, submitted_keys=[], undispatched_keys=["km_context"])
+
+    unrecorded_id = registry.register(
+        kind=FANOUT_KIND_QUESTION_ADVISORY,
+        session_id="s1",
+        correlation_key="context.lane_id",
+        expected_keys=["km_context"],
+        synthesizer_input={},
+    )
+
+    assert fanout_module.lane_submission_tally(registry, "s1", "km_context") == (1, 3)
+    assert fanout_module.lane_submission_tally(
+        registry, "s1", "km_context", exclude_fanout_id=unrecorded_id
+    ) == (0, 2)
+
+
+def test_lane_submission_tally_negative_decoy_lane_is_zero_zero(tmp_path: Any) -> None:
+    """Decoy: a lane id no fan-out ever expected must read (0, 0), not error."""
+    registry = FanoutRegistry(tmp_path)
+    registry.register(
+        kind=FANOUT_KIND_QUESTION_ADVISORY,
+        session_id="s1",
+        correlation_key="context.lane_id",
+        expected_keys=["km_context"],
+        synthesizer_input={},
+    )
+    assert fanout_module.lane_submission_tally(registry, "s1", "ZZZ_no_such_lane") == (0, 0)
+
+
+def test_km_lane_warning_total_zero_is_silent(tmp_path: Any) -> None:
+    registry = FanoutRegistry(tmp_path)
+    assert _km_lane_warning(registry, "s1", {}) == ""
+
+
+def test_km_lane_warning_missing_reports_counts(tmp_path: Any) -> None:
+    registry = FanoutRegistry(tmp_path)
+    fanout_id = registry.register(
+        kind=FANOUT_KIND_QUESTION_ADVISORY,
+        session_id="s1",
+        correlation_key="context.lane_id",
+        expected_keys=["km_context"],
+        synthesizer_input={},
+    )
+    registry.register(
+        kind=FANOUT_KIND_QUESTION_ADVISORY,
+        session_id="s1",
+        correlation_key="context.lane_id",
+        expected_keys=["km_context"],
+        synthesizer_input={},
+    )
+    registry.register(
+        kind=FANOUT_KIND_QUESTION_ADVISORY,
+        session_id="s1",
+        correlation_key="context.lane_id",
+        expected_keys=["km_context"],
+        synthesizer_input={},
+    )
+    registry.mark_submission(fanout_id, submitted_keys=["km_context"], undispatched_keys=[])
+
+    warning = _km_lane_warning(registry, "s1", {})
+    assert "⚠ km_context 미제출 2/3" in warning
+
+
+def test_km_lane_warning_registry_none_is_silent() -> None:
+    assert _km_lane_warning(None, "s1", {}) == ""
+
+
+def test_lane_submission_tally_excludes_iterable_of_current_turn_ids(tmp_path) -> None:
+    """A batch turn registers one fan-out per question; all of them are excluded."""
+    from ouroboros.mcp.tools.fanout import FanoutRegistry, lane_submission_tally
+
+    registry = FanoutRegistry(tmp_path)
+    prior = registry.register(
+        kind="question_advisory",
+        session_id="sess-batch",
+        correlation_key="context.lane_id",
+        expected_keys=["code_context", "km_context"],
+        synthesizer_input={},
+        required_keys=["code_context"],
+    )
+    current = [
+        registry.register(
+            kind="question_advisory",
+            session_id="sess-batch",
+            correlation_key="context.lane_id",
+            expected_keys=["code_context", "km_context"],
+            synthesizer_input={},
+            required_keys=["code_context"],
+        )
+        for _ in range(2)
+    ]
+    assert prior and all(current)
+    assert lane_submission_tally(registry, "sess-batch", "km_context") == (3, 3)
+    assert lane_submission_tally(
+        registry, "sess-batch", "km_context", exclude_fanout_id=current
+    ) == (1, 1)
+    assert lane_submission_tally(
+        registry, "sess-batch", "km_context", exclude_fanout_id=[*current, prior]
+    ) == (0, 0)

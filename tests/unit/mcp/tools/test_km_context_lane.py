@@ -12,6 +12,7 @@ import pytest
 
 from ouroboros.mcp.tools.advisory_prompts import _advisory_output_section
 from ouroboros.mcp.tools.authoring_handlers import _build_question_advisory_request
+from ouroboros.mcp.tools.pm_batch import _investigation_step
 from ouroboros.mcp.tools.question_advisory import (
     _lane_instructions,
     build_question_advisory_request,
@@ -238,3 +239,45 @@ def test_child_prompt_has_no_output_contradiction() -> None:
     assert "not for your output — except a field the contract itself" in prompt
     assert "question_identity" in prompt
     assert "not for your output." not in prompt
+
+
+def test_km_lane_prompts_carry_the_shared_search_directive() -> None:
+    """Both renderers of the km lane — the advisory builder and PM's own
+    investigation step — word the search order, the keyword rule, the
+    fail-open fallback, and the busy-retry the same way."""
+    request = _build_question_advisory_request(
+        session_id="sess-km",
+        question=QUESTION,
+        phase="answer",
+        score=None,
+    )
+    km_lane = next(lane for lane in request["lanes"] if lane["lane_id"] == "km_context")
+    task, _extra = _lane_instructions("km_context", km_lane, request, {})
+    pm_step = _investigation_step([], '{"hits": []}', QUESTION)
+    for rendered in (task, pm_step):
+        assert "/km:search" in rendered
+        assert "3-7 keywords" in rendered
+        assert "undispatched" in rendered
+        assert "search_worker_busy" in rendered
+
+
+def test_code_context_lane_prompt_has_no_km_search_directive() -> None:
+    """The code lane's own investigation step never mentions the km search
+    order — a lane with no vault to search is not handed one."""
+    code_step = _investigation_step(
+        [{"repo_id": "api-12345678", "path": "svc/api"}], '{"repo_id": "x"}', QUESTION
+    )
+    assert "/km:search" not in code_step
+
+
+def test_km_lane_prompt_surfaces_suggested_keywords() -> None:
+    question = "How should ANP acceptance be run?"
+    request = _build_question_advisory_request(
+        session_id="sess-km-2",
+        question=question,
+        phase="answer",
+        score=None,
+    )
+    km_lane = next(lane for lane in request["lanes"] if lane["lane_id"] == "km_context")
+    task, _extra = _lane_instructions("km_context", km_lane, request, {})
+    assert "suggested:" in task

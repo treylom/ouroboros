@@ -31,6 +31,8 @@ from typing import Any
 import structlog
 
 from ouroboros.backends.capabilities import build_runtime_subagent_orchestration_contract
+from ouroboros.config.loader import load_config
+from ouroboros.km import KMRecall, extract_query
 from ouroboros.mcp.telemetry_boundary import record_subagent_dispatch_emitted
 from ouroboros.mcp.tools.advisory_prompts import (
     _INTERVIEW_DATA_CONTRACT_MAX_JSON_CHARS,
@@ -186,6 +188,34 @@ returned is not one at all.
 ```"""
 
 
+def km_search_directive(question: str | None) -> str:
+    """Return the shared km-lane search directive, both renderers word-for-word.
+
+    Named the host's own ``/km:search`` 4-tier order rather than leaving it to
+    the child to guess a search method, and points a fail-open lane at
+    ``undispatched`` instead of an empty-hits answer no reader can tell apart
+    from "searched and found nothing".
+    """
+    try:
+        endpoint = KMRecall(load_config().km).resolve_endpoint()
+    except Exception:
+        endpoint = "http://127.0.0.1:8400"
+    keywords = extract_query(question) if question else ""
+    suggested = f" (suggested: `{keywords}`)" if keywords else ""
+    return (
+        "Search order (the host's `/km:search` 4-tier): (1) GraphRAG "
+        f"`GET {endpoint}/api/search?q=<keywords>&top_k=3&mode=hybrid`, "
+        "(2) Obsidian CLI, (3) the vault-search MCP, (4) plain-text grep over "
+        "the vault — never start with local grep.\n"
+        "Query with 3-7 keywords extracted from the question, not the question "
+        f"verbatim{suggested}.\n"
+        "If a tier answers non-200, times out, or reports busy (e.g. "
+        "`search_worker_busy`), fall through to the next tier.\n"
+        'If every tier is unreachable, submit `{"key": "km_context", '
+        '"undispatched": true}` instead of empty hits.'
+    )
+
+
 def _lane_instructions(
     lane_id: str,
     raw_lane: Mapping[str, Any],
@@ -267,13 +297,13 @@ def _lane_instructions(
         )
         return (
             "Search this host's knowledge vault for notes that may already "
-            "answer the question. Extract 3-7 keywords from the question and "
-            "search with whatever vault-search means the host exposes. Return "
+            "answer the question. " + km_search_directive(request.get("question")) + " Return "
             "at most the top 3 hits as the contracted JSON only. If this host "
-            'has no vault-search means, return {"question_identity":"<the '
-            'question_identity shown in the Session block>","lane_id":'
-            '"km_context","hits":[]} — question_identity is required even '
-            "for an empty result.",
+            "exposes no vault-search means at all, submit the same "
+            "`undispatched` entry. A search that ran and found nothing returns "
+            '{"question_identity":"<the question_identity shown in the Session '
+            'block>","lane_id":"km_context","hits":[]} — question_identity is '
+            "required even for an empty result.",
             "Report paths and one-line summaries only; do not paste note bodies.\n\n"
             "## Answer Contract\n```json\n"
             + contract_json
