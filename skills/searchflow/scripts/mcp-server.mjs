@@ -110,8 +110,9 @@ function stateDir() {
 const sessionPath = (id) => join(stateDir(), `${id}.jsonl`);
 
 /** 매 도구 호출을 append — "검증했다"가 주장이 아니라 원장이 되게. */
+// bot 필드 규칙 = km-search-receipt.py:57 과 동일: DISCORD_STATE_DIR 원문(없으면 '').
 function ledgerAppend(id, event) {
-  appendFileSync(sessionPath(id), JSON.stringify(event) + '\n', 'utf8');
+  appendFileSync(sessionPath(id), JSON.stringify({ ...event, bot: process.env.DISCORD_STATE_DIR ?? '' }) + '\n', 'utf8');
 }
 
 /**
