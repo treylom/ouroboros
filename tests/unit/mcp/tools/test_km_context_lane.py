@@ -83,6 +83,9 @@ def test_interview_and_pm_emit_one_km_context_payload() -> None:
     assert len(pm) == 1
     assert interview[0]["context"]["capability"] == "recall_knowledge"
     assert interview[0]["context"]["required"] is False
+    # PM consults the vault on every question (fork km-main, 2026-09-26).
+    assert pm[0]["context"]["capability"] == "recall_knowledge"
+    assert pm[0]["context"]["required"] is True
 
 
 def test_answer_contract_schema_is_enforceable() -> None:

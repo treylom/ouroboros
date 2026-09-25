@@ -488,7 +488,11 @@ def _pm_question_advisory_fanout_metadata() -> dict[str, Any]:
                 "already answer this question; report paths and one-line summaries only."
             ),
             "capability": "recall_knowledge",
-            "required": False,
+            # Required for PM (fork km-main, 2026-09-26 — owner directive: PM workers
+            # always consult the knowledge vault). Its no-op answer always exists
+            # (`hits: []` with question_identity), so a required lane still completes
+            # when the vault has nothing. The interview lane stays optional.
+            "required": True,
             "answer_contract": _interview_km_hits_answer_contract(),
         },
     ]

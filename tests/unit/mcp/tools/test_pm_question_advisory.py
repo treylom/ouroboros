@@ -13,6 +13,7 @@ from pathlib import Path
 import re
 from typing import Any
 
+from jsonschema import Draft202012Validator
 import pytest
 
 from ouroboros.bigbang.interview import InterviewRound, InterviewState
@@ -180,6 +181,16 @@ def _submit(
                     "lane_id": "data_context",
                     "data_needed": False,
                     "no_evidence_reason": "not_a_measurement",
+                },
+            },
+            # km_context is required for PM (fork km-main, 2026-09-26); its no-op
+            # answer is an empty hit list that still carries the question identity.
+            {
+                "key": "km_context",
+                "content": {
+                    "question_identity": identity,
+                    "lane_id": "km_context",
+                    "hits": [],
                 },
             },
         ],
@@ -544,11 +555,23 @@ def test_no_reason_restates_what_the_entries_already_say() -> None:
 # ── Decision 4: a total answer, so the lane can be required ──────────────
 
 
-def test_both_lanes_are_required_and_both_have_a_no_op_answer() -> None:
+def test_required_lanes_each_have_a_no_op_answer() -> None:
+    # Two evidence lanes plus km_context (required for PM since fork km-main,
+    # 2026-09-26). Each must be completable when there is nothing to report.
     lanes = _pm_question_advisory_fanout_metadata()["lanes"]
     required = [lane for lane in lanes if lane["required"]]
-    assert [lane["lane_id"] for lane in required] == ["code_context", "data_context"]
+    assert [lane["lane_id"] for lane in required] == ["code_context", "data_context", "km_context"]
     assert all(lane["required"] for lane in required)
+    km_schema = next(lane for lane in required if lane["lane_id"] == "km_context")[
+        "answer_contract"
+    ]["response_model_schema"]
+    Draft202012Validator(km_schema).validate(
+        {
+            "question_identity": stable_pm_question_identity(QUESTION),
+            "lane_id": "km_context",
+            "hits": [],
+        }
+    )
     code_states = {
         state["title"]
         for state in pm_code_context_answer_contract()["response_model_schema"]["oneOf"]
