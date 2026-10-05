@@ -7,7 +7,7 @@
         "--python",
         ">=3.12",
         "--from",
-        "ouroboros-ai[mcp]==0.55.4",
+        "git+https://github.com/treylom/ouroboros.git@2f5fbe1e52e1c75594c310c7d515b538aab4dc51[mcp]",
         "ouroboros",
         "mcp",
         "serve",
