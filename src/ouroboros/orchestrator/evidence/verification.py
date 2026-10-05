@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from ouroboros.orchestrator.adapter import AgentMessage
 from ouroboros.orchestrator.evidence.ac_classification import _effective_evidence_schema_for_ac
 from ouroboros.orchestrator.evidence.claims import (
@@ -10,15 +12,22 @@ from ouroboros.orchestrator.evidence.claims import (
     _runtime_messages_support_command_claim,
     _runtime_messages_support_file_claim,
     _runtime_support_messages_for_field,
+    _workspace_relative_file_claim,
 )
+from ouroboros.orchestrator.evidence.command_replay import replayed_command_supports_claim
 from ouroboros.orchestrator.evidence.common import _flatten_evidence_values
 from ouroboros.orchestrator.evidence.harness_observation import (
     is_harness_observation_message,
     observation_from_message,
     observations_confirm_unmutated_workspace,
 )
+from ouroboros.orchestrator.evidence.observed_runs import (
+    SCRIPT_ABSENT_FROM_ARTIFACT,
+    observed_zero_exit_run,
+)
 from ouroboros.orchestrator.evidence.test_detection import (
     _functional_command_supports_test_claim,
+    _runtime_messages_have_completed_command_for_test_claim,
     _runtime_messages_have_masked_test_command_for_test_claim,
     _runtime_messages_support_test_claim,
 )
@@ -95,6 +104,12 @@ def _verify_atomic_evidence_against_runtime_messages(
 
     unsupported: list[str] = []
     evidence_form_mismatches: list[str] = []
+    # Observed runs whose script is absent from the artifact: not replayable,
+    # so they yield no evidence; they are not fabrication.
+    not_replayed: list[str] = []
+    masked_command_mismatch = False
+    completed_command_mismatch = False
+    absent_script_mismatch = False
     backed_commands = tuple(
         command
         for command in _flatten_evidence_values(typed_evidence.get("commands_run"))
@@ -112,13 +127,13 @@ def _verify_atomic_evidence_against_runtime_messages(
         if not values:
             if field_name in required_fields:
                 # A pure-verification run may honestly have nothing to touch:
-                # when the AC's hidden verify gate stays the behavioral
-                # authority and the harness's own snapshot diff witnessed zero
-                # workspace mutation, an empty files_touched is corroborated
-                # truth, not withheld evidence.
+                # when the verify gate is active and the harness's own
+                # snapshot diff witnessed zero workspace mutation, an empty
+                # files_touched is corroborated truth, not withheld evidence.
+                # Whether the AC also carries a success contract does not
+                # change what the snapshot proved, so it is not a condition.
                 if (
                     field_name == "files_touched"
-                    and has_success_contract
                     and verify_gate_active
                     and observations_confirm_unmutated_workspace(support_messages)
                 ):
@@ -132,10 +147,21 @@ def _verify_atomic_evidence_against_runtime_messages(
                     continue
                 if _harness_observation_supports_command_claim(value, support_messages):
                     continue
+                # Replay-first: a transcript command linked to this claim
+                # exited 0 when the harness replayed it in a workspace copy.
+                if replayed_command_supports_claim(value, support_messages):
+                    continue
+                # The transcript recorded this command running with exit 0
+                # as part of a larger Bash call (after the edit that set it
+                # up): the same structured support the whole-command alias
+                # gives, narrowed to a recorded zero exit.
+                if observed_zero_exit_run(value, support_messages, task_cwd=workspace_cwd):
+                    continue
                 if _runtime_messages_have_masked_test_command_form(
                     value,
                     field_messages,
                 ):
+                    masked_command_mismatch = True
                     evidence_form_mismatches.append(f"{field_name}: {value}")
                     unsupported.append(f"{field_name}: {value}")
                     continue
@@ -148,6 +174,25 @@ def _verify_atomic_evidence_against_runtime_messages(
                     task_cwd=workspace_cwd,
                 ):
                     continue
+                # A dependent AC often finds its files already built by a
+                # sibling, verifies them, and lists them as "touched". The
+                # claim is literally false, so it is admitted only where it is
+                # harmless: the AC carries a success contract whose hidden
+                # verify gate is the behavioural authority (a leaf that did
+                # nothing still has to pass it), the harness's own snapshot
+                # diff witnessed zero mutation, and the named path is a real
+                # workspace file. A prose AC keeps the rejection -- there a
+                # stale file must not prove this run touched it. A ghost path
+                # stays unsupported, and any observed mutation withdraws the
+                # waiver so a leaf that wrote something else cannot launder an
+                # unrelated claim through it.
+                if (
+                    has_success_contract
+                    and verify_gate_active
+                    and observations_confirm_unmutated_workspace(support_messages)
+                    and _claimed_file_exists_in_workspace(value, task_cwd=workspace_cwd)
+                ):
+                    continue
                 unsupported.append(f"{field_name}: {value}")
                 continue
             if field_name == "tests_passed":
@@ -158,29 +203,55 @@ def _verify_atomic_evidence_against_runtime_messages(
                     task_cwd=workspace_cwd,
                 ):
                     continue
-                # Functional-verification tier: only when a hidden verify gate
-                # stays the behavioral authority for this AC, a non-test claim
-                # that IS a transcript-backed successful execution of an
-                # artifact this run produced is honest evidence, not
-                # fabrication.
-                if (
-                    has_success_contract
-                    and verify_gate_active
-                    and _functional_command_supports_test_claim(
-                        value=value,
-                        messages=support_messages,
-                        task_cwd=workspace_cwd,
-                    )
+                if replayed_command_supports_claim(value, support_messages):
+                    continue
+                # Functional-verification tier: while the verify gate is
+                # active, a non-test claim that IS a transcript-backed,
+                # zero-exit execution of a real workspace artifact is honest
+                # evidence, not fabrication. The tier used to require a
+                # success contract on the AC as well; a prose AC is exactly
+                # where transcript-backed functional evidence is the only
+                # behavioural evidence there is, so that condition kept the
+                # tier away from the ACs that needed it.
+                if verify_gate_active and _functional_command_supports_test_claim(
+                    value=value,
+                    messages=support_messages,
+                    task_cwd=workspace_cwd,
                 ):
                     continue
+                # The same functional tier for a run the transcript recorded
+                # inside a larger Bash call. When its script is no longer in
+                # the workspace (a scratch script the worker ran and deleted),
+                # the run cannot be replayed and nothing vouches for what it
+                # ran: no evidence, never fabrication. Without the verify gate
+                # it stays a rejection, as an evidence-form mismatch.
+                observed = observed_zero_exit_run(value, support_messages, task_cwd=workspace_cwd)
+                if observed is not None and observed.script is not None:
+                    if observed.script_present:
+                        if verify_gate_active:
+                            continue
+                    elif verify_gate_active:
+                        not_replayed.append(f"{field_name}: {value}")
+                        continue
+                    else:
+                        absent_script_mismatch = True
+                        evidence_form_mismatches.append(f"{field_name}: {value}")
+                        unsupported.append(f"{field_name}: {value}")
+                        continue
                 if _runtime_messages_have_masked_test_command_for_test_claim(
                     value=value,
                     messages=support_messages,
                     task_cwd=workspace_cwd,
                 ):
+                    masked_command_mismatch = True
                     evidence_form_mismatches.append(f"{field_name}: {value}")
                     unsupported.append(f"{field_name}: {value}")
                     continue
+                if _runtime_messages_have_completed_command_for_test_claim(
+                    value=value, messages=support_messages
+                ):
+                    completed_command_mismatch = True
+                    evidence_form_mismatches.append(f"{field_name}: {value}")
                 unsupported.append(f"{field_name}: {value}")
                 continue
             if not _runtime_messages_support_claim(value, field_messages):
@@ -192,16 +263,67 @@ def _verify_atomic_evidence_against_runtime_messages(
             if evidence_form_mismatches and len(evidence_form_mismatches) == len(unsupported)
             else "FABRICATION_SUSPECTED"
         )
-        reason_prefix = (
-            "evidence form mismatch; unprotected output-filter pipeline "
-            "cannot prove a clean command claim"
-            if failure_class == "EVIDENCE_FORM_MISMATCH"
-            else "unsupported evidence claims"
-        )
+        reason_prefix = "unsupported evidence claims"
+        if failure_class == "EVIDENCE_FORM_MISMATCH":
+            details = []
+            if masked_command_mismatch:
+                details.append(
+                    "unprotected output-filter pipeline cannot prove a clean command claim"
+                )
+            if completed_command_mismatch:
+                details.append(
+                    "recorded command completion cannot prove tests_passed; "
+                    "retry with contract-compliant test evidence from the runtime "
+                    "or a runner-owned adapter"
+                )
+            if absent_script_mismatch:
+                details.append(
+                    f"{SCRIPT_ABSENT_FROM_ARTIFACT}: the recorded run's script is not "
+                    "in the workspace, so it cannot be replayed; keep the script or "
+                    "cite a command that checks the delivered artifact"
+                )
+            reason_prefix = "evidence form mismatch; " + "; ".join(details)
         return VerifierVerdict(
             passed=False,
             reasons=(reason_prefix + ": " + "; ".join(unsupported),),
             failure_class=failure_class,
         )
 
+    if not_replayed:
+        # Every other claim is supported; these runs happened but cannot be
+        # replayed, so they are recorded and prove nothing. A criterion with
+        # another tests_passed claim proven passes on that claim. One whose
+        # only tests_passed claims are these has no evidence: the verifier
+        # withholds its pass without rejecting the work.
+        record = tuple(f"{SCRIPT_ABSENT_FROM_ARTIFACT}: {entry}" for entry in not_replayed)
+        test_claims = (
+            tuple(_flatten_evidence_values(typed_evidence.get("tests_passed")))
+            if "tests_passed" in required_fields
+            else ()
+        )
+        # Only tests_passed claims are ever not replayed, and every other
+        # one reached here proven.
+        if len(test_claims) > len(not_replayed):
+            return VerifierVerdict(passed=True, not_replayed=record)
+        return VerifierVerdict(
+            passed=False,
+            reasons=(f"not_replayed: {SCRIPT_ABSENT_FROM_ARTIFACT}: " + "; ".join(not_replayed),),
+            failure_class=FailureClass.SCRIPT_ABSENT_FROM_ARTIFACT.value,
+            not_replayed=record,
+        )
+
     return VerifierVerdict(passed=True)
+
+
+def _claimed_file_exists_in_workspace(value: str, *, task_cwd: str | None) -> bool:
+    """Return True when a ``files_touched`` value names an existing regular file
+    inside the workspace. Without a workspace nothing can vouch for it."""
+    if task_cwd is None:
+        return False
+    relative = _workspace_relative_file_claim(value, task_cwd=task_cwd)
+    if relative is None:
+        return False
+    try:
+        return (Path(task_cwd).resolve() / relative).is_file()
+    except (OSError, RuntimeError, ValueError):
+        return False

@@ -18,7 +18,7 @@ import uuid
 import pytest
 
 from ouroboros import telemetry
-from ouroboros.config.loader import get_telemetry_enabled
+from ouroboros.config.loader import get_telemetry_enabled, telemetry_opt_out_in_env
 
 
 @pytest.fixture(autouse=True)
@@ -214,6 +214,30 @@ class TestOptOut:
         telemetry.capture("command_run", {"command": "run"})
         telemetry.flush(timeout=1.0)
         assert events == []
+
+
+class TestTelemetryOptOutInEnv:
+    """The env half of the telemetry opt-out contract, persisted by setup."""
+
+    def test_do_not_track_truthy(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("DO_NOT_TRACK", "1")
+        monkeypatch.delenv("OUROBOROS_TELEMETRY", raising=False)
+        assert telemetry_opt_out_in_env() is True
+
+    def test_ouroboros_telemetry_falsy(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("DO_NOT_TRACK", raising=False)
+        monkeypatch.setenv("OUROBOROS_TELEMETRY", "off")
+        assert telemetry_opt_out_in_env() is True
+
+    def test_ouroboros_telemetry_1_is_not_an_opt_out(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("DO_NOT_TRACK", raising=False)
+        monkeypatch.setenv("OUROBOROS_TELEMETRY", "1")
+        assert telemetry_opt_out_in_env() is False
+
+    def test_unset_env_is_not_an_opt_out(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("DO_NOT_TRACK", raising=False)
+        monkeypatch.delenv("OUROBOROS_TELEMETRY", raising=False)
+        assert telemetry_opt_out_in_env() is False
 
 
 class TestDistinctId:
@@ -619,6 +643,54 @@ class TestCapture:
         assert command["properties"]["status"] == "blocked"
         assert "error_type" not in command["properties"]
 
+    def test_seed_origin_is_kept_only_from_the_closed_set(self, sent: list[dict[str, Any]]) -> None:
+        """``origin`` answers one question: is the interview-less path used."""
+        telemetry.capture_tool_call(
+            "ouroboros_generate_seed", ok=True, origin="session_context_gap"
+        )
+        telemetry.flush(timeout=2.0)
+
+        props = next(event["properties"] for event in sent if event["event"] == "command_run")
+        assert props["command"] == "seed"
+        assert props["origin"] == "session_context_gap"
+
+    def test_seed_origin_outside_closed_set_is_dropped(self, sent: list[dict[str, Any]]) -> None:
+        telemetry.capture_tool_call(
+            "ouroboros_generate_seed", ok=True, origin="/home/alice/private-seed"
+        )
+        telemetry.flush(timeout=2.0)
+
+        props = next(event["properties"] for event in sent if event["event"] == "command_run")
+        assert "origin" not in props
+
+    def test_origin_is_dropped_for_every_other_command(self, sent: list[dict[str, Any]]) -> None:
+        telemetry.capture_tool_call("ouroboros_start_execute_seed", ok=True, origin="interview")
+        telemetry.flush(timeout=2.0)
+
+        props = next(event["properties"] for event in sent if event["event"] == "command_run")
+        assert props["command"] == "run"
+        assert "origin" not in props
+
+    def test_seed_rows_with_different_origins_are_not_collapsed_by_daily_dedupe(
+        self, sent: list[dict[str, Any]]
+    ) -> None:
+        """One user can take both entrances in a day; each is its own row."""
+        telemetry.capture_tool_call("ouroboros_generate_seed", ok=True, origin="interview")
+        telemetry.capture_tool_call("ouroboros_generate_seed", ok=True, origin="session_context")
+        telemetry.capture_tool_call("ouroboros_generate_seed", ok=True, origin="session_context")
+        telemetry.flush(timeout=2.0)
+
+        rows = [event["properties"] for event in sent if event["event"] == "command_run"]
+        assert [row["origin"] for row in rows] == [
+            "interview",
+            "session_context",
+            "session_context",
+        ]
+        # PostHog folds rows on ``$insert_id``: the two entrances keep distinct
+        # ids, the repeated entrance shares one.
+        assert rows[0]["$insert_id"] != rows[1]["$insert_id"]
+        assert rows[1]["$insert_id"] == rows[2]["$insert_id"]
+
     def test_successful_internal_and_polling_commands_are_dropped(
         self, sent: list[dict[str, Any]]
     ) -> None:
@@ -738,6 +810,22 @@ class TestCapture:
         props = sent[0]["properties"]
         assert props["failure_reason_code"] == "validation"
         assert props["failure_cause"] == "verify_workspace_mutated"
+
+    def test_failed_run_forwards_launch_cause(self, sent: list[dict[str, Any]]) -> None:
+        telemetry.capture_job_outcome(
+            "job-private-id",
+            "execute_seed",
+            terminal_status="failed",
+            result_meta={
+                "failure_reason_code": "config",
+                "failure_cause": "launch_workspace_unavailable",
+            },
+        )
+        telemetry.flush(timeout=2.0)
+
+        props = sent[0]["properties"]
+        assert props["failure_reason_code"] == "config"
+        assert props["failure_cause"] == "launch_workspace_unavailable"
 
     def test_unaudited_failure_cause_folds_to_unknown(self, sent: list[dict[str, Any]]) -> None:
         telemetry.capture_job_outcome(
@@ -1517,3 +1605,120 @@ class TestAcVerifyFailed:
         from ouroboros.orchestrator.verify_gate_outcome import _VERIFY_GATE_CAUSES
 
         assert telemetry._AC_VERIFY_CAUSES == _VERIFY_GATE_CAUSES
+
+
+class TestAcceptanceNoEvidence:
+    """Closed-vocabulary counts of criteria accepted without evidence."""
+
+    @staticmethod
+    def _config(text: str) -> None:
+        config_dir = Path.home() / ".ouroboros"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "config.yaml").write_text(text, encoding="utf-8")
+
+    @staticmethod
+    def _capture(pairs: Any, **overrides: Any) -> None:
+        kwargs: dict[str, Any] = {
+            "criterion_count": 4,
+            "verification_coverage": "low",
+            "surface": "cli_run",
+            "check_package": "on",
+            "check_package_status": "admitted",
+            "runtime_backend": "codex",
+        }
+        kwargs.update(overrides)
+        telemetry.capture_acceptance_no_evidence(pairs, **kwargs)
+
+    def test_counts_each_reason_pair(self, sent: list[dict[str, Any]]) -> None:
+        self._capture(
+            [
+                ("uncovered", "no_verifier_verdict"),
+                ("uncovered", "no_verifier_verdict"),
+                ("no_binding", "transcript_unavailable"),
+            ]
+        )
+        telemetry.flush(timeout=2.0)
+
+        assert len(sent) == 1
+        assert sent[0]["event"] == "acceptance_no_evidence"
+        props = sent[0]["properties"]
+        assert props["pair_uncovered__no_verifier_verdict"] == 2
+        assert props["pair_no_binding__transcript_unavailable"] == 1
+        assert props["no_evidence_count"] == 3
+        assert props["criterion_count"] == 4
+        assert props["verification_coverage"] == "low"
+        assert props["surface"] == "cli_run"
+        assert props["check_package"] == "on"
+        assert props["check_package_status"] == "admitted"
+        assert props["runtime_backend"] == "codex"
+        assert set(props) <= telemetry._ACCEPTANCE_NO_EVIDENCE_KEYS
+
+    def test_folds_unaudited_values_to_unknown(self, sent: list[dict[str, Any]]) -> None:
+        hostile = "/private/seed.yaml: add(2, 3) returns 5"
+        self._capture(
+            [(hostile, hostile), (None, None)],
+            verification_coverage=hostile,
+            surface=hostile,
+            check_package=hostile,
+            check_package_status=hostile,
+            runtime_backend=hostile,
+        )
+        telemetry.flush(timeout=2.0)
+
+        props = sent[0]["properties"]
+        assert props["pair_unknown__unknown"] == 2
+        for key in (
+            "verification_coverage",
+            "surface",
+            "check_package",
+            "check_package_status",
+            "runtime_backend",
+        ):
+            assert props[key] == "unknown"
+        assert hostile not in json.dumps(sent[0])
+
+    def test_sends_nothing_without_a_no_evidence_acceptance(
+        self, sent: list[dict[str, Any]]
+    ) -> None:
+        self._capture([])
+        telemetry.flush(timeout=2.0)
+        assert sent == []
+
+    def test_on_by_default_without_any_config(self, sent: list[dict[str, Any]]) -> None:
+        assert not (Path.home() / ".ouroboros" / "config.yaml").exists()
+        self._capture([("uncovered", "no_verifier_verdict")])
+        telemetry.flush(timeout=2.0)
+        assert len(sent) == 1
+
+    @pytest.mark.parametrize(
+        ("env", "config"),
+        (
+            ({"DO_NOT_TRACK": "1"}, None),
+            ({"OUROBOROS_TELEMETRY": "0"}, None),
+            ({}, "telemetry:\n  enabled: false\n"),
+        ),
+    )
+    def test_every_opt_out_suppresses_it(
+        self,
+        sent: list[dict[str, Any]],
+        monkeypatch: pytest.MonkeyPatch,
+        env: dict[str, str],
+        config: str | None,
+    ) -> None:
+        for key, value in env.items():
+            monkeypatch.setenv(key, value)
+        if config is not None:
+            self._config(config)
+        self._capture([("uncovered", "no_verifier_verdict")])
+        telemetry.flush(timeout=2.0)
+        assert sent == []
+
+    def test_never_raises(self, sent: list[dict[str, Any]]) -> None:
+        def broken() -> Any:
+            yield ("uncovered", "no_verifier_verdict")
+            raise RuntimeError("boom")
+
+        self._capture(broken())
+        self._capture(None)
+        telemetry.flush(timeout=2.0)
+        assert sent == []

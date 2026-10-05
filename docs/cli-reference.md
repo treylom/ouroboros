@@ -388,6 +388,8 @@ ouroboros init [start] [OPTIONS] [CONTEXT]
 | `--runtime TEXT` | Agent runtime backend for the workflow execution step after seed generation. Shipped values: `claude`, `codex`, `opencode`, `hermes`, `gemini`, `goose`, `kiro`, `copilot`, `pi`, `omp`, `gjc`, `antigravity`, `grok`, `zcode`. Custom adapters registered in `runtime_factory.py` are also accepted. |
 | `--llm-backend TEXT` | LLM backend for interview, ambiguity scoring, and seed generation (`claude_code`, `litellm`, `codex`, `copilot`, `opencode`, `gemini`, `goose`, `kiro`, `pi`, `omp`, `zcode`, `dsh`). `dsh` needs two more settings — see [the DeepSeek Harness guide](guides/deepseek-harness.md). |
 | `-d, --debug` | Show verbose logs including debug messages |
+| `-m, --model TEXT` | Model for every role in this command: `auto` (latest of each role's tier), `frugal`, `standard`, `frontier`, or a model id. Tier names work on every backend; Claude aliases such as `opus` only on Claude backends. Default: `models.default` in config (`auto`) |
+| `--pin-models/--no-pin-models` | Run the per-role model ids saved in config for this command (research and reproducibility). Default: `models.pin` in config (off) |
 
 **Examples:**
 
@@ -406,6 +408,9 @@ ouroboros init --orchestrator --runtime codex "Build a REST API"
 
 # Use Codex as the LLM backend for interview and seed generation
 ouroboros init --llm-backend codex "Build a REST API"
+
+# Run the interview and seed generation on the frontier tier
+ouroboros init start --model frontier "Build a REST API"
 
 # Resume an interrupted interview
 ouroboros init start --resume interview_20260116_120000
@@ -459,13 +464,18 @@ ouroboros run [workflow] [OPTIONS] SEED_FILE
 |--------|-------------|
 | `-o/-O, --orchestrator/--no-orchestrator` | Use the agent-runtime orchestrator for execution (default: enabled) |
 | `--runtime TEXT` | Agent runtime backend override (`claude`, `codex`, `opencode`, `hermes`, `gemini`, `copilot`, `goose`, `kiro`, `pi`, `omp`, `gjc`, `antigravity`, `grok`, `zcode`). Uses configured default if omitted |
-| `-r, --resume TEXT` | Resume a previous orchestrator session by ID |
+| `-r, --resume TEXT` | Resume a previous orchestrator session by ID. A run continues only while the process that started it holds its live state (its check package's held-out cases never leave that process); resumed from a new process, the run is recorded as failed and a new attempt starts from the project, while the interrupted attempt's work stays on its task branch |
 | `--mcp-config PATH` | Path to MCP client configuration YAML file |
 | `--mcp-tool-prefix TEXT` | Prefix to add to all MCP tool names (e.g., `mcp_`) |
 | `-s, --sequential` | Execute ACs sequentially instead of in parallel |
 | `--max-decomposition-depth INTEGER` | Maximum recursive AC decomposition depth (any non-negative integer; default `2`). Values `0..4` are eligible for Routing D durable replay. Larger legacy values remain executable but do not publish the Routing D parallel resume-owner guarantee. The same contract applies to `OUROBOROS_MAX_DECOMPOSITION_DEPTH` and `seed.orchestrator.max_decomposition_depth` |
 | `-n, --dry-run` | Validate seed without executing. **Currently only takes effect with `--no-orchestrator`.** In default orchestrator mode this flag is accepted but has no effect — the full workflow executes |
 | `--no-qa` | Skip post-execution QA evaluation |
+| `--auto-evaluate/--no-auto-evaluate` | After the run finishes (completed or failed), enqueue formal evaluation of the directory the run executed in (inside its task worktree) and wait for its result, as `ooo run` does. A paused or cancelled run is not evaluated. Default: `execution.auto_evaluate` in config (on) |
+| `--auto-evolve/--no-auto-evolve` | When formal evaluation is not approved, continue into the bounded Ralph job the evaluation chains and wait for its result. Default: `execution.auto_evolve` in config (on) |
+| `--check-package/--no-check-package` | Build executable checks from the acceptance criteria before the worker starts, admit them on the current tree, and let them decide the criteria they cover (the existing verifier stays advisory for those and decides the rest). On by default; `--no-check-package` opts out for this run. Default: `OUROBOROS_CHECK_PACKAGE` (only the exact value `on` turns it on; any other set value, such as `1`, `true` or `ON`, means off), then `boundary.check_package` in config, then on. The checks are model-written Python scripts: they run on throwaway copies of the project with the project's interpreter, a per-check timeout, and an allowlisted environment, confined by the execution sandbox (they can write only inside their copy and a scratch directory, and have no network); they can read files you can read. Where the sandbox is unavailable, a check is undecided and does not run. The same switch applies to `ooo run` from a plugin host, meaning the in-process `ouroboros_execute_seed` / `ouroboros_start_execute_seed` path; an execution dispatched to the OpenCode plugin's child session is not governed and reports `check_package: not_applied`. Only Claude Code and Codex CLI can construct checks; with another runtime the existing verifier decides the run. |
+| `-m, --model TEXT` | Model for every role in this run, the check package and the evaluation it continues into included: `auto` (latest of each role's tier), `frugal`, `standard`, `frontier`, or a model id. Tier names work on every backend; Claude aliases such as `opus` only on Claude backends. Default: `models.default` in config (`auto`) |
+| `--pin-models/--no-pin-models` | Run the per-role model ids saved in config for this run (research and reproducibility). Default: `models.pin` in config (off) |
 | `-d, --debug` | Show logs and agent thinking (verbose output) |
 
 **Examples:**
@@ -489,6 +499,19 @@ ouroboros run seed.yaml --resume orch_abc123
 # Skip post-execution QA
 ouroboros run seed.yaml --no-qa
 
+# Stop after the run instead of continuing into formal evaluation
+ouroboros run seed.yaml --no-auto-evaluate
+
+# Evaluate, but do not continue a rejected evaluation into Ralph
+ouroboros run seed.yaml --no-auto-evolve
+
+# Run every role on the frontier tier
+ouroboros run seed.yaml --model frontier
+
+# Opt out of the check package for this run (or: OUROBOROS_CHECK_PACKAGE=off,
+# or boundary.check_package: off in ~/.ouroboros/config.yaml)
+ouroboros run seed.yaml --no-check-package
+
 # Debug output
 ouroboros run seed.yaml --debug
 
@@ -498,6 +521,15 @@ ouroboros run seed.yaml --sequential
 # Allow up to four recursive splits with Routing D durable replay
 ouroboros run seed.yaml --max-decomposition-depth 4
 ```
+
+After execution (and post-execution QA on success), `ouroboros run` continues into formal
+evaluation and, when the evaluation is not approved, a bounded Ralph job, the same chain
+`ooo run` uses. The evaluation and Ralph jobs run in detached background workers; the command
+waits for each, prints its result, and keeps the run's own exit code (a failed run still exits
+`1`, and a failure to start evaluation is only a warning). Ctrl-C while waiting stops waiting
+without cancelling the jobs and prints their job ids; follow them with
+`ouroboros job wait <job_id> --timeout-seconds 60 --view compact` and
+`ouroboros job result <job_id>`.
 
 Depth values above `4` remain accepted for compatibility and execute through the
 historical legacy parallel path. They do not publish the Routing D parallel
@@ -640,12 +672,24 @@ persist into `orchestrator.runtime_profile.stages`. The shipped presets:
 > already encodes in `consensus.diversity_required`. A preset may reference a
 > backend whose CLI is not installed; staging still works and the per-card
 > warning flags it. Pick the preset closest to your subscriptions, then tune
-> individual cards. Model-tier presets (Frugal / Balanced / Frontier) sit in a
-> separate row and stage per-stage models rather than backends.
+> individual cards. Model presets (Auto / Frugal / Standard / Frontier) sit in
+> the Defaults band and set the one `models.default` switch; the field under
+> them takes any model id. The **Pin per-role model ids** switch sets
+> `models.pin`, and the per-stage model ids it applies are grouped under
+> **Advanced**.
 
 ### `config show`
 
 Display current configuration summary, or a specific section.
+
+The summary includes a models table: one row per role (the check package runs
+on the Execute model) with its tier, backend, resolved model, and source
+(`auto`, `pin`, `invocation`, `configured`, or `shipped_fallback`), under a
+`models: auto (pin off)`, `models: pinned`, or
+`models: <value> for every role (<source>)` header. Saved per-role model ids
+that are not applied because pin is off are listed under `ignored (pin off)`,
+each with the hint `set models.pin: true to use`. `--json` emits the same data
+under the `models` key.
 
 ```bash
 ouroboros config show [SECTION]
@@ -660,8 +704,11 @@ ouroboros config show [SECTION]
 **Examples:**
 
 ```bash
-# Show configuration summary (backend, CLI path, DB, log level)
+# Show configuration summary (backend, models, CLI path, DB, log level)
 ouroboros config show
+
+# Machine-readable view; the models table is under the "models" key
+ouroboros config show --json
 
 # Show only orchestrator section
 ouroboros config show orchestrator
@@ -733,6 +780,12 @@ ouroboros config set logging.level debug
 
 # Override LLM backend separately from runtime backend
 ouroboros config set llm.backend litellm
+
+# One model switch for every role: auto, frugal, standard, frontier, or a model id
+ouroboros config set models.default frontier
+
+# Run the per-role model ids saved in config (research and reproducibility)
+ouroboros config set models.pin true
 ```
 
 ### `config validate`
@@ -1161,6 +1214,16 @@ ouroboros tui monitor --backend slt
 ## `ouroboros mcp`
 
 MCP (Model Context Protocol) server commands for Claude Desktop and other MCP-compatible clients.
+
+### `mcp doctor --machine-snapshot`
+
+Run read-only MCP environment diagnostics. The default command prints health checks; `--json` emits the existing list of checks. Add `--machine-snapshot` to opt into a typed, content-free static snapshot; with `--json`, the result is an object containing the existing `checks` list and `machine_snapshot` fields.
+
+The snapshot covers OS, architecture, Python, current executable, installed `ouroboros-ai` version/location, home-directory disk usage, and fixed `~/.ouroboros/config.yaml` `lstat` metadata. It never reads configuration contents or credentials, invokes commands, scans `PATH`, inspects processes, probes ports or networks, writes files, or repairs anything. Missing, permission, unsupported, and unexpected probe failures are reported as `not_checked` with stable reasons. Native Windows machine architecture is explicitly `not_checked` rather than inferred from shell commands or environment variables. PATH collisions, loopback/port checks, and owned-process metadata are outside this static snapshot.
+
+```bash
+ouroboros mcp doctor [--json] [--machine-snapshot]
+```
 
 ### `mcp serve`
 

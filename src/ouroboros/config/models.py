@@ -9,6 +9,7 @@ Classes:
     ProviderCredentials: API credentials for a single provider
     CredentialsConfig: All provider credentials
     LLMConfig: Shared LLM backend/model defaults
+    ModelsConfig: Automatic model selection and pinning
     EconomicsConfig: Economic model with tier definitions
     ClarificationConfig: Phase 0 configuration
     ExecutionConfig: Phase 2 configuration
@@ -30,7 +31,6 @@ from pydantic import BaseModel, Field, field_validator
 import yaml
 
 from ouroboros.config._model_defaults import (
-    DEFAULT_CONSENSUS_OPUS_MODEL,
     DEFAULT_HAIKU_MODEL,
     DEFAULT_OPUS_MODEL,
     DEFAULT_SONNET_MODEL,
@@ -148,14 +148,13 @@ class LLMConfig(BaseModel, frozen=True):
     ] = "claude_code"
     permission_mode: Literal["default", "acceptEdits", "bypassPermissions"] = "default"
     opencode_permission_mode: Literal["default", "acceptEdits", "bypassPermissions"] = "acceptEdits"
-    qa_model: str = DEFAULT_SONNET_MODEL
-    # Dependency and ontology analysis are bounded structured-extraction tasks;
-    # Sonnet is sufficient and Opus is waste. (The "stable tier for reproducible
-    # grading" rationale covers evaluation/consensus, not these.) Effort-first:
-    # the floor should not start at the most expensive tier.
-    dependency_analysis_model: str = DEFAULT_SONNET_MODEL
-    ontology_analysis_model: str = DEFAULT_SONNET_MODEL
-    context_compression_model: str = "gpt-4"
+    # Model fields default to "auto" (the latest model of the role's tier; see
+    # ``ouroboros.config.model_selection``). Dependency and ontology analysis
+    # are bounded structured-extraction tasks, so their tier is standard.
+    qa_model: str = "auto"
+    dependency_analysis_model: str = "auto"
+    ontology_analysis_model: str = "auto"
+    context_compression_model: str = "auto"
 
 
 class LLMProviderProfileConfig(BaseModel, frozen=True):
@@ -207,6 +206,24 @@ class LLMTaskProfileConfig(BaseModel, frozen=True):
         return providers
 
 
+class ModelsConfig(BaseModel, frozen=True):
+    """How every role's model is chosen.
+
+    Attributes:
+        default: ``auto`` (the latest model of each role's tier for the active
+            backend), a tier name (``frugal``/``standard``/``frontier``) applied
+            to every role, or a model id applied to every role.
+        pin: Run the concrete model ids persisted in role fields and
+            ``OUROBOROS_*_MODEL`` variables on every backend. Off by default:
+            those ids are then ignored except on backends whose ids are
+            provider-owned (``litellm``, ``copilot``). Turn on for research
+            or reproducibility.
+    """
+
+    default: str = "auto"
+    pin: bool = False
+
+
 class ClarificationConfig(BaseModel, frozen=True):
     """Phase 0 (Big Bang) configuration.
 
@@ -220,7 +237,7 @@ class ClarificationConfig(BaseModel, frozen=True):
     ambiguity_threshold: float = Field(default=0.2, ge=0.0, le=1.0)
     max_interview_rounds: int = Field(default=10, ge=1)
     model_tier: Literal["frugal", "standard", "frontier"] = "standard"
-    default_model: str = DEFAULT_OPUS_MODEL
+    default_model: str = "auto"
 
 
 class ExecutionConfig(BaseModel, frozen=True):
@@ -242,6 +259,11 @@ class ExecutionConfig(BaseModel, frozen=True):
             must exist under the run workspace and ``verify_command`` must exit
             0 (plus any ``output_assertion``). On by default.
         verify_command_timeout_seconds: Timeout for an AC verify command.
+        exec_sandbox: Whether commands the controller runs on its own
+            authority (legacy-verifier replay) are confined by the execution
+            sandbox (``runtime/exec_sandbox.py``). On by default. ``false`` is
+            unsafe: those commands then run unconfined, able to write outside
+            their workspace copy and to use the network.
         ac_retry_attempts: How many times a failed AC is re-dispatched before
             it is marked FAILED (per-AC, excludes stall retries).
         cross_harness_redispatch: Whether a terminally failing AC may be
@@ -276,6 +298,7 @@ class ExecutionConfig(BaseModel, frozen=True):
     default_model: str | None = None
     run_verify_commands: bool = True
     verify_command_timeout_seconds: int = Field(default=600, ge=1)
+    exec_sandbox: bool = True
     ac_retry_attempts: int = Field(default=2, ge=0)
     cross_harness_redispatch: bool = False
     n_version_tournament: bool = False
@@ -346,8 +369,8 @@ class ResilienceConfig(BaseModel, frozen=True):
     lateral_thinking_enabled: bool = True
     lateral_model_tier: Literal["frugal", "standard", "frontier"] = "frontier"
     lateral_temperature: float = Field(default=0.8, ge=0.0, le=2.0)
-    wonder_model: str = DEFAULT_OPUS_MODEL
-    reflect_model: str = DEFAULT_OPUS_MODEL
+    wonder_model: str = "auto"
+    reflect_model: str = "auto"
 
 
 class EvaluationConfig(BaseModel, frozen=True):
@@ -368,8 +391,8 @@ class EvaluationConfig(BaseModel, frozen=True):
     stage3_enabled: bool = True
     satisfaction_threshold: float = Field(default=0.8, ge=0.0, le=1.0)
     uncertainty_threshold: float = Field(default=0.3, ge=0.0, le=1.0)
-    semantic_model: str = DEFAULT_OPUS_MODEL
-    assertion_extraction_model: str = DEFAULT_SONNET_MODEL
+    semantic_model: str = "auto"
+    assertion_extraction_model: str = "auto"
 
 
 class ConsensusConfig(BaseModel, frozen=True):
@@ -388,14 +411,10 @@ class ConsensusConfig(BaseModel, frozen=True):
     min_models: int = Field(default=3, ge=2)
     threshold: float = Field(default=0.67, ge=0.0, le=1.0)
     diversity_required: bool = True
-    models: tuple[str, ...] = (
-        "openrouter/openai/gpt-4o",
-        DEFAULT_CONSENSUS_OPUS_MODEL,
-        "openrouter/google/gemini-2.5-pro",
-    )
-    advocate_model: str = DEFAULT_CONSENSUS_OPUS_MODEL
-    devil_model: str = "openrouter/openai/gpt-4o"
-    judge_model: str = "openrouter/google/gemini-2.5-pro"
+    models: tuple[str, ...] = ("auto",)
+    advocate_model: str = "auto"
+    devil_model: str = "auto"
+    judge_model: str = "auto"
 
 
 class PersistenceConfig(BaseModel, frozen=True):
@@ -823,6 +842,38 @@ class KMConfig(BaseModel, frozen=True):
     max_label_chars: int = Field(default=600, ge=1)
 
 
+class BoundaryConfig(BaseModel, frozen=True):
+    """Pre-dispatch check package for ``ooo run`` (on by default).
+
+    Attributes:
+        check_package: ``on`` makes a new ``ooo run`` construct a check package
+            from the Seed's acceptance criteria before the worker starts, admit
+            it on the base checkout, and verify the finished workspace against
+            it. ``off`` leaves the run path unchanged. Unset (default) means
+            ``on`` (``ouroboros.boundary.switch``).
+        constructor_timeout_seconds: Wall-clock budget of one read-only
+            constructor model call.
+        check_timeout_seconds: Per-check command timeout during admission and
+            candidate verification.
+        max_construction_attempts: Package versions tried before the worker
+            starts. A version that is not admitted is superseded by the next
+            one; 1 means no regeneration.
+    """
+
+    check_package: Literal["off", "on"] | None = None
+    constructor_timeout_seconds: int = Field(default=600, ge=30, le=3600)
+    check_timeout_seconds: int = Field(default=120, ge=5, le=1800)
+    max_construction_attempts: int = Field(default=2, ge=1, le=5)
+
+    @field_validator("check_package", mode="before")
+    @classmethod
+    def _yaml_booleans(cls, value: Any) -> Any:
+        # YAML 1.1 reads a bare ``on`` / ``off`` as a boolean.
+        if isinstance(value, bool):
+            return "on" if value else "off"
+        return value
+
+
 class OuroborosConfig(BaseModel, frozen=True):
     """Top-level Ouroboros configuration.
 
@@ -832,6 +883,7 @@ class OuroborosConfig(BaseModel, frozen=True):
     Attributes:
         economics: Economic model and tier configuration
         llm: Shared LLM backend and model configuration
+        models: Automatic model selection and the explicit pin switch
         clarification: Phase 0 (Big Bang) configuration
         execution: Phase 2 configuration
         resilience: Phase 3 configuration
@@ -845,10 +897,12 @@ class OuroborosConfig(BaseModel, frozen=True):
         logging: Logging configuration
         seed: Seed-authoring gates applied before execution
         km: Knowledge-vault recall configuration
+        boundary: Pre-dispatch check package for ``ooo run`` (on by default)
     """
 
     economics: EconomicsConfig = Field(default_factory=EconomicsConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
+    models: ModelsConfig = Field(default_factory=ModelsConfig)
     clarification: ClarificationConfig = Field(default_factory=ClarificationConfig)
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
     resilience: ResilienceConfig = Field(default_factory=ResilienceConfig)
@@ -864,6 +918,7 @@ class OuroborosConfig(BaseModel, frozen=True):
     telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)
     seed: SeedConfig = Field(default_factory=SeedConfig)
     km: KMConfig = Field(default_factory=KMConfig)
+    boundary: BoundaryConfig = Field(default_factory=BoundaryConfig)
 
 
 def get_default_config() -> OuroborosConfig:
@@ -914,6 +969,21 @@ def get_default_config() -> OuroborosConfig:
             downgrade_success_streak=5,
         ),
     )
+
+
+def fresh_config_data() -> dict[str, Any]:
+    """The contents of a new config.yaml.
+
+    Models are chosen by ``models.default`` (``auto``) alone: the per-role model
+    fields are left out, so a fresh file holds no model id that goes stale.
+    """
+    # Deferred: model_selection reads this module's types.
+    from ouroboros.config.model_selection import ROLE_MODEL_CONFIG_PATHS
+
+    data = get_default_config().model_dump(mode="json")
+    for section, field in ROLE_MODEL_CONFIG_PATHS:
+        data[section].pop(field, None)
+    return data
 
 
 def get_default_credentials() -> CredentialsConfig:

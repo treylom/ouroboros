@@ -19,6 +19,7 @@ Privacy contract — see TELEMETRY.md at the repository root:
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 import hashlib
 import json
 import os
@@ -249,6 +250,7 @@ _COMMAND_RUN_MCP_KEYS = frozenset(
         "service",
         "status",
         "error_type",
+        "origin",
         "$insert_id",
         "runtime_backend",
         "app_version",
@@ -256,6 +258,12 @@ _COMMAND_RUN_MCP_KEYS = frozenset(
         "ci",
     }
 )
+# ``origin`` exists for exactly one question -- is the interview-less Seed
+# path (``ouroboros_generate_seed`` with ``session_context``) being used, and
+# does it produce a Seed or bounce back gap questions? It is stamped only on
+# ``command=seed`` rows and only from this closed set; any other value or
+# command drops it before the properties dict is built.
+_SEED_ORIGINS = frozenset({"interview", "session_context", "session_context_gap"})
 _COMMAND_RUN_CLI_KEYS = frozenset(
     {
         "command",
@@ -378,9 +386,71 @@ _RUNTIME_DRIFT_KINDS = frozenset(
         "skill_dispatch_registry",
         "profile_routing",
         "baseline_unavailable",
+        "attestation_timeout",
     }
 )
 _UNKNOWN_DRIFT_KIND = "unknown"
+# A run accepted criteria no verifier had evidence for. The acceptance itself
+# is unchanged (``boundary/acceptance.py``); this counts how often it happens
+# and why, per (package_reason, replay_reason) pair. SSOT pairing with
+# boundary/no_evidence.py (package reasons) and boundary/acceptance.py
+# ``LegacyNoEvidenceReason`` (replay reasons) -- edit them together. Only
+# closed tokens and counts; never a criterion, check, binding, or path.
+_NO_EVIDENCE_PACKAGE_REASONS = frozenset(
+    {
+        "uncovered",
+        "no_admitted_package",
+        "no_binding",
+        "no_binding_after_request",
+        "no_binding_budget_exhausted",
+        "script_check_advisory",
+        "no_held_out_case",
+        "no_reproduction_check",
+    }
+)
+_NO_EVIDENCE_REPLAY_REASONS = frozenset(
+    {
+        "environment_unverifiable",
+        "transcript_unavailable",
+        "script_absent_from_artifact",
+        "no_verifier_verdict",
+        "verifier_verdict_not_passed",
+        "no_legacy_record",
+    }
+)
+_NO_EVIDENCE_SURFACES = frozenset({"cli_run", "mcp_execute", "evolve"})
+_NO_EVIDENCE_COVERAGES = frozenset({"full", "partial", "low"})
+_NO_EVIDENCE_CHECK_PACKAGE = frozenset({"on", "off"})
+_NO_EVIDENCE_PACKAGE_STATUSES = frozenset(
+    {"admitted", "construction_failed", "rejected", "not_run"}
+)
+_UNKNOWN_NO_EVIDENCE_VALUE = "unknown"
+_NO_EVIDENCE_PAIR_PREFIX = "pair_"
+
+
+def _no_evidence_pair_key(package_reason: str, replay_reason: str) -> str:
+    return f"{_NO_EVIDENCE_PAIR_PREFIX}{package_reason}__{replay_reason}"
+
+
+_ACCEPTANCE_NO_EVIDENCE_KEYS = frozenset(
+    {
+        "criterion_count",
+        "no_evidence_count",
+        "verification_coverage",
+        "surface",
+        "check_package",
+        "check_package_status",
+        "runtime_backend",
+        "app_version",
+        "os",
+        "ci",
+    }
+    | {
+        _no_evidence_pair_key(package_reason, replay_reason)
+        for package_reason in _NO_EVIDENCE_PACKAGE_REASONS | {_UNKNOWN_NO_EVIDENCE_VALUE}
+        for replay_reason in _NO_EVIDENCE_REPLAY_REASONS | {_UNKNOWN_NO_EVIDENCE_VALUE}
+    }
+)
 # Bound on any single string property. Dropped, not truncated -- a truncated
 # value could still leak the start of a prompt or path.
 _MAX_PROPERTY_STR_LEN = 200
@@ -928,6 +998,8 @@ def _resolve_allowed_keys(event: str, properties: dict[str, Any] | None) -> froz
         return _AC_VERIFY_FAILED_KEYS
     if event == "runtime_drift":
         return _RUNTIME_DRIFT_KEYS
+    if event == "acceptance_no_evidence":
+        return _ACCEPTANCE_NO_EVIDENCE_KEYS
     return None
 
 
@@ -947,6 +1019,7 @@ def _daily_insert_id(
         properties.get("transport"),
         properties.get("phase"),
         properties.get("fanout_kind"),
+        properties.get("origin"),
     )
     material = "\0".join(str(value or "") for value in (distinct_id_value, day, event, *dimensions))
     return hashlib.sha256(material.encode()).hexdigest()
@@ -1009,8 +1082,13 @@ def capture_tool_call(
     error_type: str | None = None,
     blocked: bool = False,
     registered: bool = True,
+    origin: str | None = None,
 ) -> None:
-    """Capture service activity plus retained lifecycle/failure commands."""
+    """Capture service activity plus retained lifecycle/failure commands.
+
+    ``origin`` is honoured only for ``command=seed`` and only when it is one
+    of ``_SEED_ORIGINS``; every other combination is dropped silently.
+    """
     del duration_ms
     try:
         if not registered:
@@ -1027,15 +1105,16 @@ def capture_tool_call(
             status = "accepted" if ok else "rejected"
         else:
             status = "succeeded" if ok else "failed"
-        capture(
-            "command_run",
-            {
-                "command": command or name.removeprefix("ouroboros_"),
-                "service": "mcp",
-                "status": status,
-                "error_type": error_type,
-            },
-        )
+        command_value = command or name.removeprefix("ouroboros_")
+        properties: dict[str, Any] = {
+            "command": command_value,
+            "service": "mcp",
+            "status": status,
+            "error_type": error_type,
+        }
+        if command_value == "seed" and origin in _SEED_ORIGINS:
+            properties["origin"] = origin
+        capture("command_run", properties)
     except Exception:
         pass
 
@@ -1067,6 +1146,67 @@ def capture_runtime_drift(kind: str | None) -> None:
         capture(
             "runtime_drift",
             {"kind": kind if kind in _RUNTIME_DRIFT_KINDS else _UNKNOWN_DRIFT_KIND},
+        )
+    except Exception:
+        pass
+
+
+def _fold(value: Any, vocabulary: frozenset[str]) -> str:
+    return value if isinstance(value, str) and value in vocabulary else _UNKNOWN_NO_EVIDENCE_VALUE
+
+
+def _canonical_runtime_backend(value: Any) -> str:
+    """A shipped runtime backend name, else ``unknown`` (never a caller string)."""
+    try:
+        from ouroboros.backends.capabilities import runtime_backend_choices
+
+        return _fold(value, frozenset(runtime_backend_choices()))
+    except Exception:
+        return _UNKNOWN_NO_EVIDENCE_VALUE
+
+
+def capture_acceptance_no_evidence(
+    pairs: Iterable[tuple[str | None, str | None]],
+    *,
+    criterion_count: int,
+    verification_coverage: str | None,
+    surface: str | None,
+    check_package: str | None,
+    check_package_status: str | None,
+    runtime_backend: str | None,
+) -> None:
+    """Capture one run's criteria accepted without evidence from any verifier.
+
+    ``pairs`` holds one ``(package_reason, replay_reason)`` per such
+    criterion: why the check package did not decide it, and why the legacy
+    verifier (claim replay) had no evidence. Each axis folds anything outside
+    its audited vocabulary to ``unknown``; the counts are sent as
+    ``pair_<package_reason>__<replay_reason>`` integers. Nothing is sent when
+    no criterion was accepted without evidence. Never raises.
+    """
+    try:
+        counts: dict[str, int] = {}
+        for package_reason, replay_reason in pairs:
+            key = _no_evidence_pair_key(
+                _fold(package_reason, _NO_EVIDENCE_PACKAGE_REASONS),
+                _fold(replay_reason, _NO_EVIDENCE_REPLAY_REASONS),
+            )
+            counts[key] = counts.get(key, 0) + 1
+        total = sum(counts.values())
+        if total == 0:
+            return
+        capture(
+            "acceptance_no_evidence",
+            {
+                **counts,
+                "criterion_count": criterion_count,
+                "no_evidence_count": total,
+                "verification_coverage": _fold(verification_coverage, _NO_EVIDENCE_COVERAGES),
+                "surface": _fold(surface, _NO_EVIDENCE_SURFACES),
+                "check_package": _fold(check_package, _NO_EVIDENCE_CHECK_PACKAGE),
+                "check_package_status": _fold(check_package_status, _NO_EVIDENCE_PACKAGE_STATUSES),
+                "runtime_backend": _canonical_runtime_backend(runtime_backend),
+            },
         )
     except Exception:
         pass
