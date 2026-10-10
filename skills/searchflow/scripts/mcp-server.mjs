@@ -323,7 +323,7 @@ const TOOLS = [
   },
   {
     name: 'searchflow_submit',
-    description: 'Submit one frame\'s collected sources. Provide every source you looked at, including ones you discarded, with its grade and status. Returns an acknowledgement only — no scoring.',
+    description: 'Submit one frame\'s graded sources. The lead submits the independent grader\'s values unchanged — every source the worker looked at, including discarded ones, with its grade and status. Returns an acknowledgement only — no scoring.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -576,7 +576,8 @@ function toolGate(args) {
   const led = ledgerRead(session_id);
   if (!led) throw new Error(`세션 없음: ${session_id}`);
   const start = led.find((e) => e.event === 'start');
-  const rounds = led.filter((e) => e.event === 'gate').length;
+  // 미제출 대기(incomplete)는 조사 라운드가 아니므로 세지 않는다 — 세면 재조사 횟수가 줄어든다.
+  const rounds = led.filter((e) => e.event === 'gate' && e.decision !== 'incomplete').length;
 
   const byFrame = new Map(start.frames.map((f) => [f.frame_id, []]));
   for (const e of led) {
@@ -877,6 +878,19 @@ function selfTest() {
   const capSession = evidenceSession('tech');
   const capDecisions = Array.from({length:4}, () => toolGate({session_id:capSession.session_id}).decision);
   ok('반증 미달도 4번째 gate에 한계 종결', capDecisions.join(',') === 'reinvestigate,reinvestigate,reinvestigate,done_with_gaps');
+  // incomplete 판정은 조사 라운드가 아니다 — 미제출 대기 뒤에도 재조사 3회가 보장돼야 한다
+  const lateSession = toolStart({question: 'late submit', type: 'tech', salt: 'late-test', gate: G_OK});
+  const lateDecisions = [toolGate({session_id: lateSession.session_id}).decision];
+  for (const frame of lateSession.frames) toolSubmit({session_id: lateSession.session_id, frame_id: frame.frame_id,
+    sources: [{url: 'https://p', grade: 'ORIGINAL', status: 'used', stance: 'support', published: recent},
+              {url: 'https://o', grade: 'ORIGINAL', status: 'used'}]});
+  for (let i = 0; i < 4; i++) lateDecisions.push(toolGate({session_id: lateSession.session_id}).decision);
+  ok('incomplete 뒤에도 재조사 3회 후 한계 종결', lateDecisions.join(',') === 'incomplete,reinvestigate,reinvestigate,reinvestigate,done_with_gaps', lateDecisions.join(','));
+  // 버린(discarded) 반증은 반증으로 치지 않는다
+  const discardedRefute = evidenceSession('factcheck');
+  toolSubmit({session_id: discardedRefute.session_id, frame_id: 'f2', sources: [{url: 'https://refute-x', grade: 'A', status: 'discarded', discard_reason: 'off-topic', stance: 'refute'}]});
+  const drOut = toolGate({session_id: discardedRefute.session_id});
+  ok('discarded 반증 = 반증 규칙 미통과', drOut.decision === 'reinvestigate' && latestRule(discardedRefute) === 'refute');
   let secretBlocks = 0;
   for (const value of [{freshness_days:1}, {require_refute:true}, {rule:'refute'}, {guidance:'최근 730일'}, {guidance:'최근 365일'}, {guidance:'최근 1095일'}]) {
     try { assertNoLeak(value); } catch { secretBlocks++; }
