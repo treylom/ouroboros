@@ -16,6 +16,12 @@
         "--llm-backend",
         "claude_code"
       ]
+    },
+    "searchflow": {
+      "command": "node",
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/skills/searchflow/scripts/mcp-server.mjs"
+      ]
     }
   }
 }

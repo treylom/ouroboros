@@ -57,7 +57,7 @@ node scripts/robots-gate.mjs <s004 URL>           → exit 1 (blocked, Disallow:
 
 ## 방법론 출처
 
-유형 판정(`factcheck`) → 프레임 4축 확정 → 축별 조사 단위 스폰 → 리드가 등급 부여·병합 → 판정표 합성. 절차 정의 = `SKILL.md` P0~P4.
+유형 판정(`factcheck`) → 프레임 4축 확정 → 축별 조사 단위 스폰 → 독립 채점자가 등급 부여·리드가 수정 없이 병합 → 판정표 합성. 절차 정의 = `SKILL.md` P0~P4.
 
 ## 전제 반문 1개 + 답
 
@@ -69,6 +69,7 @@ node scripts/robots-gate.mjs <s004 URL>           → exit 1 (blocked, Disallow:
 1차 종료 조건(사용자 마감 시한) 도달 전에 판정이 닫혀 **라운드 1에서 종료**. 재조사 라운드 미사용. 시한 여유 있음 — 시한에 걸려 멈춘 것이 아니다.
 
 ## 환경·한계
+grader=independent-subagent
 
 - `parallelism=sequential` · `tier=sequential` · `degraded=no-orchestration-tool` — 이 실행 환경에 병렬 오케스트레이션 도구가 없어 축을 순차로 조사했다. **지지 축과 반증 축은 순차에서도 별개 조사 단위로 유지**했다.
 - `cross-engine=not-run` — 교차 엔진 검증 미수행(enhanced 층 부재).

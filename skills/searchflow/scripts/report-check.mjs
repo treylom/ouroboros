@@ -20,7 +20,8 @@
 //
 // 외부 패키지 0 (node: 내장만).
 
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
@@ -100,7 +101,21 @@ export function check(file, requiredLabels = [], contractPath) {
   // 강등 라벨은 spawn-plan 이 낸 문자열 그대로 실려야 한다(AC9 grep 대상).
   const labelsMissing = requiredLabels.filter(l => !text.includes(l));
 
+  // Require the grader in the environment/limitations field, not incidental prose elsewhere.
+  const environment = [];
+  let inEnvironment = false;
+  for (const line of lines) {
+    if (/^#{1,6}\s/.test(line)) inEnvironment = /^#{1,6}\s*환경·한계/.test(line);
+    else if (/^\s*(?:[-*]\s*)?\*\*.+?\*\*/.test(line)) inEnvironment = /^\s*(?:[-*]\s*)?\*\*환경·한계/.test(line);
+    if (inEnvironment || /^\|\s*(?:\*\*)?환경·한계/.test(line)) environment.push(line);
+  }
+  const environmentText = environment.join('\n');
+  const degradedGrader = /grader\s*[:=]\s*lead\(degraded\)/.test(environmentText);
+  const graderReason = /grader_reason\s*[:=]\s*[^\s|`]+/.test(environmentText);
+  const graderPresent = /\bgrader\s*[:=]\s*(?:independent-subagent|lead\(degraded\))(?=\s|[|`.,]|$)/.test(environment.join('\n'));
   const violations = [
+    ...(degradedGrader && !graderReason ? ['채점자 강등 사유 부재 — grader_reason 필요'] : []),
+    ...(!graderPresent ? ['채점자 라벨 부재 — 환경·한계에 grader=independent-subagent 또는 grader=lead(degraded) 필요'] : []),
     ...missing.map(c => `칸 부재 — ${c}`),
     ...empty.map(c => `칸이 제목만 있고 내용 없음 — ${c}`),
     ...labelsMissing.map(l => `격하 라벨 부재 — ${l} (환경·한계 칸에 문자열 그대로 필요)`),
@@ -132,6 +147,19 @@ function selfTest() {
   t('음성 — 제목만 있고 내용 없는 칸 검출', !!hit(/제목만/), hit(/제목만/) || '');
   t('음성 — 격하 라벨 부재 검출', !!hit(/격하 라벨 부재/), hit(/격하 라벨 부재/) || '');
   t('음성 — 위반 3종이 동시에 잡힘', bad.violations.length >= 3, `${bad.violations.length}건`);
+
+  const scratch = mkdtempSync(join(tmpdir(), 'searchflow-report-'));
+  try {
+    const missingGrader = join(scratch, 'missing-grader.md');
+    writeFileSync(missingGrader, readFileSync(join(FIX, 'report-valid.md'), 'utf8').replace(/grader=independent-subagent/g, ''));
+    const negative = run([missingGrader]);
+    t('음성 — grader 없는 보고서 exit 1', negative.status === 1 && negative.stderr.includes('채점자 라벨 부재'));
+    const degraded = join(scratch, 'degraded.md');
+    writeFileSync(degraded, readFileSync(join(FIX, 'report-valid.md'), 'utf8').replace('grader=independent-subagent', 'grader=lead(degraded) grader_reason=no-orchestration-tool'));
+    t('양성 — 명시적 grader 강등', run([degraded]).status === 0);
+    writeFileSync(degraded, readFileSync(degraded, 'utf8').replace('grader_reason=no-orchestration-tool', ''));
+    t('음성 — grader 강등 사유 누락', run([degraded]).status === 1);
+  } finally { rmSync(scratch, {recursive: true, force: true}); }
 
   // 검사기가 항상 위반을 뱉는 고장이면 위 양성이 의미 없다 → 양성/음성 쌍으로 확인 완료.
   t('대조 성립 — 같은 검사기가 양성 0 / 음성 3+', ok.violations.length === 0 && bad.violations.length >= 3);

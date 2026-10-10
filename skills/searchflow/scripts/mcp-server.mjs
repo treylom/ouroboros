@@ -39,7 +39,9 @@ const DEFAULT_CRITERIA = {
   weights: { ORIGINAL: 1.0, A: 0.75, B: 0.45, C: 0.15, UNREACHABLE: 0 },
   threshold: 1.6,     // 프레임 통과선
   min_sources: 2,     // 프레임당 최소 유효 출처
-  max_rounds: 2,      // 재조사 상한 (시한 1차·라운드 2차)
+  freshness_days: { factcheck: 1095, compare: 730, market: 365, tech: 730, policy: 730, open: 1095 },
+  require_refute: true,
+  max_rounds: 4,      // 초기 조사 + 재조사 최대 세 번
 };
 
 /** 스왑 훅 — 검증자가 기준을 통째로 갈아끼우는 **유일한** 입구(env: JSON 1개). */
@@ -52,6 +54,8 @@ function loadCriteria() {
   const merged = { ...DEFAULT_CRITERIA, ...c, weights: { ...DEFAULT_CRITERIA.weights, ...(c.weights || {}) } };
   for (const g of Object.keys(DEFAULT_CRITERIA.weights))
     if (typeof merged.weights[g] !== 'number') die(2, `기준 스왑 무효 — weights.${g} 가 수가 아니다`);
+  if (!merged.freshness_days || typeof merged.freshness_days !== 'object' || Array.isArray(merged.freshness_days) || Object.values(merged.freshness_days).some(v => !Number.isFinite(v) || v < 0)) die(2, '신선도 기준 형식 위반');
+  if (typeof merged.require_refute !== 'boolean') die(2, '반증 기준 형식 위반');
   if (typeof merged.threshold !== 'number') die(2, '기준 스왑 무효 — threshold 가 수가 아니다');
   return merged;
 }
@@ -81,7 +85,7 @@ const MAX_ROUNDS = CRITERIA.max_rounds;
 /** 응답에 새면 안 되는 것들. 값이 아니라 **이름**으로 막는다 — 값은 바뀌어도 이름은 남는다. */
 const LEAK_KEYS = new Set([
   'score', 'scores', 'weight', 'weights', 'threshold', 'cutoff',
-  'grade_weight', 'total', 'points', 'min_sources', 'max_rounds',
+  'grade_weight', 'total', 'points', 'min_sources', 'max_rounds', 'freshness_days', 'require_refute', 'rule',
 ]);
 
 
@@ -261,6 +265,9 @@ function assertNoLeak(payload) {
   // 넣는 순간 이 검사기가 상시 거짓 RED 가 된다(= 무시되는 검사기 = 죽은 검사기).
   // 그 축은 키 이름(`LEAK_KEYS`)과 별도 은닉 e2e 가 담당한다.
   if (numericTokens(txt).some((n) => n === THRESHOLD)) seen.push(`literal:${THRESHOLD}`);
+  for (const days of Object.values(CRITERIA.freshness_days)) {
+    if (new RegExp('(?<![\\d])' + days + '(?![\\d])').test(txt)) seen.push('freshness-literal');
+  }
   if (seen.length) {
     throw new Error(`은닉 위반 — 응답에 채점 내부값이 실렸다: ${seen.join(',')}`);
   }
@@ -332,6 +339,8 @@ const TOOLS = [
               claim: { type: 'string' },
               grade: { type: 'string', enum: ['ORIGINAL', 'A', 'B', 'C', 'UNREACHABLE'] },
               status: { type: 'string', enum: ['used', 'discarded', 'unreachable'] },
+              stance: { type: 'string', enum: ['support', 'refute', 'neutral'] },
+              published: { type: 'string', pattern: '^\\d{4}(-\\d{2}(-\\d{2})?)?$' },
               grade_basis: { type: 'string' },
               discard_reason: { type: 'string' },
               unreachable_reason: { type: 'string', enum: ['blocked', 'not-traced'] },
@@ -381,9 +390,9 @@ function workerBrief(question, frameId, focus, deadline) {
     '  탐색 순서: 최신 발행분부터 연다. 오래된 자료를 근거로 쓸 때는 더 최신의 정정·후속이 있는지 확인한다.',
     '  2차 자료를 근거로 쓸 때는 원본 링크 추적을 1회 시도하고, 실패하면 "원본 미도달"이라 적는다.',
     '',
-    '제출: 본 출처를 **버린 것까지 전부** searchflow_submit 으로 낸다.',
-    '  url · grade(ORIGINAL|A|B|C|UNREACHABLE = 그 URL 이 주장에 대해 무엇인가)',
-    '  · status(used|discarded|unreachable = 당신이 그걸로 무엇을 했나) · 버렸으면 사유.',
+    '반환: 본 출처를 버린 것까지 전부 findings 파일로 리드에게 돌려준다. MCP 도구를 직접 호출하지 않는다.',
+    '  url · claim · verbatim · accessed_at · 확인 가능한 발행일과 반대 증거를 포함한다.',
+    '  버렸거나 못 읽었으면 사유를 적는다. 등급은 매기지 않는다. 독립 채점자가 맡는다.',
     '  얼마나 모으면 되는지는 당신이 정하지 않는다. 다 내고 나면 서버가 판정한다.',
     '',
     `마감: ${deadline}. 도달하면 그 시점 산출을 그대로 낸다(미완도 낸다).`,
@@ -486,7 +495,7 @@ function toolStart(args) {
     instructions:
       `프레임 ${frames.length}개를 병렬로 조사한다. **각 프레임의 worker_brief 를 그 워커에게 그대로 전달한다** — ` +
       `문장을 늘리거나 요약하지 말 것(늘어난 문장이 채점 기준을 실어 나른다). ` +
-      `워커 산출이 오면 프레임마다 searchflow_submit 으로 제출하고, 다 냈으면 searchflow_gate 를 호출한다. ` +
+      `워커 산출이 오면 새 독립 채점 서브에이전트가 scoring.md와 질의·유형·산출 파일을 읽고 grades-r<N>.json을 작성한다. 리드는 채점 파일 값을 수정 없이 프레임마다 searchflow_submit으로 제출한 뒤 searchflow_gate를 호출한다. 재조사마다 채점자도 새로 스폰한다. ` +
       `충분한지는 서버가 판정한다 — 깊이를 스스로 정하지 말 것.`,
   });
 }
@@ -499,6 +508,8 @@ function toolSubmit(args) {
   for (const s of sources) {
     if (!WEIGHTS.hasOwnProperty(s.grade)) throw new Error(`grade enum 위반: ${s.grade}`);
     if (!['used', 'discarded', 'unreachable'].includes(s.status)) throw new Error(`status enum 위반: ${s.status}`);
+    if (s.stance !== undefined && !['support', 'refute', 'neutral'].includes(s.stance)) throw new Error('stance enum 위반');
+    if (s.published !== undefined && parsePublished(s.published) === null) throw new Error('published 날짜 형식 위반');
     // 축 분리 강제 — ledger schema v1 과 동일 계약
     if (s.grade === 'UNREACHABLE' && !s.unreachable_reason)
       throw new Error('grade=UNREACHABLE 이면 unreachable_reason(blocked|not-traced) 필수');
@@ -548,6 +559,18 @@ function emitGate(session_id, ledgerEvent, out) {
   return sent;
 }
 
+// Partial dates conservatively use the first day of the stated period, in UTC.
+function parsePublished(value) {
+  if (typeof value !== 'string' || !/^\d{4}(?:-\d{2}(?:-\d{2})?)?$/.test(value)) return null;
+  const [year, month = 1, day = 1] = value.split('-').map(Number);
+  if (year < 1 || month < 1 || month > 12 || day < 1 || day > 31) return null;
+  const date = new Date(0);
+  date.setUTCFullYear(year, month - 1, day);
+  date.setUTCHours(0, 0, 0, 0);
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) return null;
+  return date.getTime();
+}
+
 function toolGate(args) {
   const { session_id } = args;
   const led = ledgerRead(session_id);
@@ -571,8 +594,30 @@ function toolGate(args) {
 
   // 판정은 서버 안에서. 밖으로는 결론만.
   const judged = [...byFrame.entries()].map(([fid, srcs]) => ({ fid, ...scoreFrame(srcs) }));
-  const weak = judged.filter((j) => j.total < THRESHOLD || j.usable < MIN_SOURCES)
+  let weak = judged.filter((j) => j.total < THRESHOLD || j.usable < MIN_SOURCES)
                      .sort((a, b) => a.total - b.total);
+
+  let rule = 'grade';
+  let guidance;
+  if (!weak.length && CRITERIA.require_refute &&
+      ![...byFrame.values()].some(srcs => srcs.some(s => s.status === 'used' && s.stance === 'refute'))) {
+    const target = start.frames.find(f => /반증|한계|반론/.test(f.focus)) || start.frames.at(-1);
+    weak = [{ fid: target.frame_id }];
+    rule = 'refute';
+    guidance = '반대 증거를 찾지 못했다 — 이 결론을 흔드는 반대 증거·실패 사례를 찾아라.';
+  }
+  if (!weak.length) {
+    const now = Date.now();
+    const days = CRITERIA.freshness_days[start.type] ?? 1095;
+    weak = [...byFrame.entries()].filter(([, srcs]) => !srcs.some(s => {
+      const date = parsePublished(s.published);
+      return s.status === 'used' && date !== null && date <= now && now - date <= days * 86400000;
+    })).map(([fid]) => ({ fid }));
+    if (weak.length) {
+      rule = 'freshness';
+      guidance = '근거가 오래됐거나 날짜가 없다 — 더 최신 자료나 그 후속을 찾아라.';
+    }
+  }
 
   if (weak.length === 0) {
     const out = { decision: 'done',
@@ -584,16 +629,16 @@ function toolGate(args) {
     const out = { decision: 'done_with_gaps',
       weak_frames: weak.map((w) => w.fid),
       guidance: '재조사 상한에 도달했다. 부족한 프레임을 보고서에 **한계로 명시**하고 마무리한다 — 조용히 넘기지 말 것.' };
-    return emitGate(session_id, { event: 'gate', decision: out.decision, rounds: rounds + 1, weak: out.weak_frames }, out);
+    return emitGate(session_id, { event: 'gate', rule, decision: out.decision, rounds: rounds + 1, weak: out.weak_frames }, out);
   }
 
   const target = weak[0];
-  const reason = target.usable < MIN_SOURCES
+  const reason = guidance || (target.usable < MIN_SOURCES
     ? '이 프레임은 쓸 수 있는 출처가 너무 적다 — 서로 독립된 출처를 더 찾는다.'
-    : '이 프레임은 근거가 원본에서 멀다 — 인용된 원문·1차 자료를 직접 열어 등급을 올린다.';
+    : '이 프레임은 근거가 원본에서 멀다 — 인용된 원문·1차 자료를 직접 열어 등급을 올린다.');
   const out = { decision: 'reinvestigate', frame_id: target.fid, guidance: reason,
     note: '가장 약한 프레임 하나만 다시 본다. 나머지는 그대로 둔다.' };
-  return emitGate(session_id, { event: 'gate', decision: 'reinvestigate', frame_id: target.fid, rounds: rounds + 1 }, out);
+  return emitGate(session_id, { event: 'gate', rule, decision: 'reinvestigate', frame_id: target.fid, rounds: rounds + 1 }, out);
 }
 
 const DISPATCH = { searchflow_start: toolStart, searchflow_submit: toolSubmit, searchflow_gate: toolGate };
@@ -723,7 +768,7 @@ function selfTest() {
   const s3 = S('강한 근거 세션');
   for (const f of ['f1', 'f2', 'f3']) {
     toolSubmit({ session_id: s3.session_id, frame_id: f,
-      sources: [{ url: 'x', grade: 'ORIGINAL', status: 'used' }, { url: 'y', grade: 'ORIGINAL', status: 'used' }] });
+      sources: [{ url: 'x', grade: 'ORIGINAL', status: 'used', stance: 'refute', published: new Date().toISOString().slice(0, 10) }, { url: 'y', grade: 'ORIGINAL', status: 'used' }] });
   }
   const g3 = toolGate({ session_id: s3.session_id });
   ok('강한 근거 = done', g3.decision === 'done');
@@ -801,8 +846,48 @@ function selfTest() {
     toolSubmit({ session_id: s4.session_id, frame_id: f, sources: [{ url: 'x', grade: 'C', status: 'used' }, { url: 'y', grade: 'C', status: 'used' }] });
   }
   toolGate({ session_id: s4.session_id });
+  ok('두 번째 gate도 재조사', toolGate({ session_id: s4.session_id }).decision === 'reinvestigate');
+  ok('세 번째 gate도 재조사', toolGate({ session_id: s4.session_id }).decision === 'reinvestigate');
   const g5 = toolGate({ session_id: s4.session_id });
   ok('재조사 상한 = done_with_gaps(한계 명시 요구)', g5.decision === 'done_with_gaps' && g5.weak_frames.length > 0);
+
+  // Independent-grader output drives refutation and freshness after grade sufficiency.
+  const recent = new Date().toISOString().slice(0, 10);
+  const evidenceSession = (type, stance = 'support', published = recent) => {
+    const session = toolStart({question: 'gate evidence', type, salt: 'new-test', gate: G_OK});
+    for (const frame of session.frames) toolSubmit({session_id: session.session_id, frame_id: frame.frame_id,
+      sources: [{url: 'https://primary', grade: 'ORIGINAL', status: 'used', stance, ...(published === null ? {} : {published})},
+                {url: 'https://other', grade: 'ORIGINAL', status: 'used'}]});
+    return session;
+  };
+  const latestRule = session => ledgerRead(session.session_id).filter(e => e.event === 'gate').at(-1)?.rule;
+  for (const [type, frame] of Object.entries({factcheck:'f2',compare:'f3',market:'f3',tech:'f3',policy:'f3',open:'f3'})) {
+    const session = evidenceSession(type);
+    const out = toolGate({session_id: session.session_id});
+    ok(`반증 없음 → ${type} 담당 프레임`, out.decision === 'reinvestigate' && out.frame_id === frame && latestRule(session) === 'refute' && !('rule' in out));
+  }
+  const refuted = evidenceSession('factcheck');
+  toolSubmit({session_id:refuted.session_id,frame_id:'f2',sources:[{url:'https://refute',grade:'A',status:'used',stance:'refute'}]});
+  ok('used 반증 한 건 → 반증 규칙 통과', toolGate({session_id:refuted.session_id}).decision === 'done');
+  for (const [label, published] of [['오래된 날짜','1900-01-01'], ['날짜 없음',null], ['미래 날짜','9999-12-31']]) {
+    const session = evidenceSession('market', 'refute', published);
+    const out = toolGate({session_id: session.session_id});
+    ok(`${label} → 신선도 재조사`, out.decision === 'reinvestigate' && latestRule(session) === 'freshness');
+  }
+  const capSession = evidenceSession('tech');
+  const capDecisions = Array.from({length:4}, () => toolGate({session_id:capSession.session_id}).decision);
+  ok('반증 미달도 4번째 gate에 한계 종결', capDecisions.join(',') === 'reinvestigate,reinvestigate,reinvestigate,done_with_gaps');
+  let secretBlocks = 0;
+  for (const value of [{freshness_days:1}, {require_refute:true}, {rule:'refute'}, {guidance:'최근 730일'}, {guidance:'최근 365일'}, {guidance:'최근 1095일'}]) {
+    try { assertNoLeak(value); } catch { secretBlocks++; }
+  }
+  ok('창 숫자·비공개 키 누출 차단', secretBlocks === 6);
+  ok('부분 날짜·윤년 유효성', parsePublished('2024') !== null && parsePublished('2024-02') !== null && parsePublished('2024-02-29') !== null && parsePublished('2025-02-29') === null);
+  let badSourceCount = 0;
+  for (const extra of [{stance:'unknown'}, {published:'2024-13'}, {published:'bad'}]) {
+    try {toolSubmit({session_id:refuted.session_id,frame_id:'f1',sources:[{url:'bad',grade:'A',status:'used',...extra}]});} catch {badSourceCount++;}
+  }
+  ok('잘못된 stance·published 제출 거부', badSourceCount === 3);
 
   // 15 알 수 없는 도구 = JSON-RPC 오류
   ok('알 수 없는 도구 = -32602',

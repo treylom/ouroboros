@@ -106,7 +106,9 @@ export function plan({ types, harness = 'cc', tools = [], multiAgentApi = 'none'
   }
 
   const labels = [`parallelism=${chosen.parallelism}`, `tier=${chosen.tier}`];
-  if (reason) labels.push(`degraded=${reason}`);
+  // All current sequential tiers mean no spawn API or explicit denial (not a scheduling preference).
+  labels.push(chosen.parallelism === 'sequential' ? 'grader=lead(degraded)' : 'grader=independent-subagent');
+  if (reason) labels.push(`degraded=${reason}`, `grader_reason=${reason}`);
   if (folded > 0) labels.push(`frames-folded=${folded}`);
 
   return {
@@ -141,6 +143,9 @@ function selfTest() {
   const hasBoth = a => a.some(u => /지지/.test(u.axis)) && a.some(u => /반증/.test(u.axis));
   t('순차 강등에서도 지지·반증 분리 유지', seq.parallelism === 'sequential' && hasBoth(seq.units),
     `tier=${seq.tier} units=${seq.units.length}`);
+
+  t('grader 강등 양성 — 스폰 불가', seq.labels.includes('grader=lead(degraded)'));
+  t('grader 강등 음성 — 독립 스폰 가능', fc.labels.includes('grader=independent-subagent') && !fc.labels.includes('grader=lead(degraded)'));
 
   // 경로 등가 — 6 tier 전부 같은 단위 집합.
   const variants = [
