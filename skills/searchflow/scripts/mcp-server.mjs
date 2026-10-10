@@ -759,30 +759,43 @@ function toolGate(args) {
 
   let rule = 'grade';
   let guidance;
+  // 반증·신선도는 재조사 1회만 시킨다. 한 번 더 찾아도 없으면 「찾아봤지만 없었다」를 보고서에 남기고 넘어간다 —
+  // 최대 횟수는 상한이지 의무가 아니다(근거 등급 미달만 최대 횟수까지 다시 본다).
+  const retried = (r) => led.some((e) => e.event === 'gate' && e.decision === 'reinvestigate' && e.rule === r);
+  const waived = [];
   if (!weak.length && CRITERIA.require_refute &&
       ![...byFrame.values()].some(srcs => srcs.some(s => s.status === 'used' && s.stance === 'refute'))) {
-    const target = start.frames.find(f => /반증|한계|반론/.test(f.focus)) || start.frames.at(-1);
-    weak = [{ fid: target.frame_id }];
-    rule = 'refute';
-    guidance = '반대 증거를 찾지 못했다 — 이 결론을 흔드는 반대 증거·실패 사례를 찾아라.';
+    if (retried('refute')) waived.push('refute');
+    else {
+      const target = start.frames.find(f => /반증|한계|반론/.test(f.focus)) || start.frames.at(-1);
+      weak = [{ fid: target.frame_id }];
+      rule = 'refute';
+      guidance = '반대 증거를 찾지 못했다 — 이 결론을 흔드는 반대 증거·실패 사례를 찾아라.';
+    }
   }
   if (!weak.length) {
     const now = Date.now();
     const days = CRITERIA.freshness_days[start.type] ?? 1095;
-    weak = [...byFrame.entries()].filter(([, srcs]) => !srcs.some(s => {
+    const stale = [...byFrame.entries()].filter(([, srcs]) => !srcs.some(s => {
       const date = parsePublished(s.published);
       return s.status === 'used' && date !== null && date <= now && now - date <= days * 86400000;
     })).map(([fid]) => ({ fid }));
-    if (weak.length) {
+    if (stale.length && retried('freshness')) waived.push('freshness');
+    else if (stale.length) {
+      weak = stale;
       rule = 'freshness';
       guidance = '근거가 오래됐거나 날짜가 없다 — 더 최신 자료나 그 후속을 찾아라.';
     }
   }
 
   if (weak.length === 0) {
+    const notes = [];
+    if (waived.includes('refute')) notes.push('반대 증거는 다시 찾아봤지만 없었다');
+    if (waived.includes('freshness')) notes.push('더 최신 자료는 다시 찾아봤지만 없었다');
     const out = { decision: 'done',
-      guidance: '근거가 충분하다. searchflow_report 로 보고서를 구성한다(P2 제공 예정 — 현재는 원장을 근거로 직접 작성).' };
-    return emitGate(session_id, { event: 'gate', decision: 'done', rounds: rounds + 1 }, out);
+      guidance: '근거가 충분하다. searchflow_report 로 보고서를 구성한다(P2 제공 예정 — 현재는 원장을 근거로 직접 작성).' +
+        (notes.length ? ` ${notes.join(' · ')} — 보고서 한계 칸에 그대로 적는다.` : '') };
+    return emitGate(session_id, { event: 'gate', decision: 'done', rounds: rounds + 1, ...(waived.length ? { waived } : {}) }, out);
   }
 
   if (rounds + 1 >= MAX_ROUNDS) {
@@ -1087,15 +1100,28 @@ function selfTest() {
     const out = toolGate({session_id: session.session_id});
     ok(`${label} → 신선도 재조사`, out.decision === 'reinvestigate' && latestRule(session) === 'freshness');
   }
+  // 반증·신선도는 재조사 1회만 — 다시 찾아도 없으면 「찾아봤지만 없었다」로 done(최대 횟수를 다 쓰지 않는다)
   const capSession = evidenceSession('tech');
-  const capDecisions = Array.from({length:4}, () => toolGate({session_id:capSession.session_id}).decision);
-  ok('반증 미달도 4번째 gate에 한계 종결', capDecisions.join(',') === 'reinvestigate,reinvestigate,reinvestigate,done_with_gaps');
+  const capOuts = Array.from({length:2}, () => toolGate({session_id:capSession.session_id}));
+  const capDone = ledgerRead(capSession.session_id).filter(e => e.event === 'gate').at(-1);
+  ok('반증 미발견 = 재조사 1회 뒤 done(한계 명시 안내)',
+     capOuts.map(o => o.decision).join(',') === 'reinvestigate,done' && /반대 증거/.test(capOuts[1].guidance) &&
+     (capDone.waived || []).includes('refute') && !('waived' in capOuts[1]), capOuts.map(o => o.decision).join(','));
+  const freshOnce = evidenceSession('market', 'refute', '1900-01-01');
+  const freshOuts = Array.from({length:2}, () => toolGate({session_id:freshOnce.session_id}));
+  ok('신선도 미달 = 재조사 1회 뒤 done(한계 명시 안내)',
+     freshOuts.map(o => o.decision).join(',') === 'reinvestigate,done' && /최신/.test(freshOuts[1].guidance) &&
+     (ledgerRead(freshOnce.session_id).filter(e => e.event === 'gate').at(-1).waived || []).includes('freshness'),
+     freshOuts.map(o => o.decision).join(','));
+  const bothSession = evidenceSession('tech', 'support', null);
+  const bothOuts = Array.from({length:3}, () => toolGate({session_id:bothSession.session_id}).decision);
+  ok('반증·신선도 둘 다 미달 = 각 1회씩 재조사 뒤 done', bothOuts.join(',') === 'reinvestigate,reinvestigate,done', bothOuts.join(','));
   // incomplete 판정은 조사 라운드가 아니다 — 미제출 대기 뒤에도 재조사 3회가 보장돼야 한다
   const lateSession = toolStart({question: 'late submit', type: 'tech', salt: 'late-test', gate: G_OK});
   const lateDecisions = [toolGate({session_id: lateSession.session_id}).decision];
   for (const frame of lateSession.frames) toolSubmit({session_id: lateSession.session_id, frame_id: frame.frame_id,
-    sources: [{url: 'https://p', grade: 'ORIGINAL', status: 'used', stance: 'support', published: recent},
-              {url: 'https://o', grade: 'ORIGINAL', status: 'used'}]});
+    sources: [{url: 'https://p', grade: 'C', status: 'used', stance: 'refute', published: recent},
+              {url: 'https://o', grade: 'C', status: 'used'}]});
   for (let i = 0; i < 4; i++) lateDecisions.push(toolGate({session_id: lateSession.session_id}).decision);
   ok('incomplete 뒤에도 재조사 3회 후 한계 종결', lateDecisions.join(',') === 'incomplete,reinvestigate,reinvestigate,reinvestigate,done_with_gaps', lateDecisions.join(','));
   // 버린(discarded) 반증은 반증으로 치지 않는다
