@@ -312,7 +312,7 @@ const INTERVIEW_FRAME =
   '- 비어 있는 칸을 한 메시지에 묶어 한 번에 묻는다(한 칸씩 여러 번 묻지 않는다). 칸마다 고를 수 있는 구체적인 보기 2~3개를 붙인다.\n' +
   '- 네 칸이 다 차면 새 칸을 열지 않는다. 채운 네 칸을 한 줄로 요약해 «이대로 맞나요?» 확인 질문 하나만 한다.';
 const INTERVIEW_CONTEXT_HOW =
-  'initial_context = 첫 줄 «원질문: "<원질문 글자 그대로>"» + 빈 줄 + 아래 [검색 인터뷰 지시] 전문(고치지 않고 그대로).';
+  'initial_context = 첫 줄 «원질문: <원질문의 JSON 문자열>»(보통은 "원질문 그대로" — 원질문 안의 " 는 \\", 줄바꿈은 \\n, \\ 는 \\\\ 로) + 빈 줄 + 아래 [검색 인터뷰 지시] 전문(고치지 않고 그대로).';
 
 const TOOLS = [
   {
@@ -330,7 +330,7 @@ const TOOLS = [
         type: { type: 'string', enum: Object.keys(TYPES), description: 'Optional. Pin the research type instead of deriving it from the question text. Omit to route normally.' },
         gate: {
           type: 'object',
-          description: 'P-1 ambiguity-gate clearance (REQUIRED by the handler — the server refuses to enter P0 without it). Grade the question on four items per SKILL.md §P-1, each O/X with one-line evidence. If any item is X, do not start research — start ouroboros_interview with initial_context = a first line \'원질문: "<the original question verbatim>"\', a blank line, then this search-interview frame verbatim:\n' + INTERVIEW_FRAME + '\n— and relay every question it asks to the operator (SKILL.md §4 operator channel ladder; no wait limit; never answer on the operator\'s behalf). After the interview completes, re-grade the refined question and include operator_clarification. Always include initial_verdicts (the first grading).',
+          description: 'P-1 ambiguity-gate clearance (REQUIRED by the handler — the server refuses to enter P0 without it). Grade the question on four items per SKILL.md §P-1, each O/X with one-line evidence. If any item is X, do not start research — start ouroboros_interview with initial_context = a first line \'원질문: <the original question as a JSON string literal>\' (usually just the question in double quotes; quotes, line breaks and backslashes escaped), a blank line, then this search-interview frame verbatim:\n' + INTERVIEW_FRAME + '\n— and relay every question it asks to the operator (SKILL.md §4 operator channel ladder; no wait limit; never answer on the operator\'s behalf). After the interview completes, re-grade the refined question and include operator_clarification. Always include initial_verdicts (the first grading).',
           properties: {
             verdicts: {
               type: 'object',
@@ -545,16 +545,16 @@ function gateCheck(gate, question) {
     const answered = (Array.isArray(iv.rounds) ? iv.rounds : [])
       .filter((r) => r && typeof r.user_response === 'string' && r.user_response.trim()).length;
     if (answered < 1) throw new Error('인터뷰에 운영자 답이 없다');
-    // 원질문 확인 = 머리 정확 일치. 부분 일치(includes)는 지시문 조각·한 글자로도 다른 질문의 인터뷰를 통과시켰다.
-    // 머리 = `원질문: "<원질문>"` 뒤에 줄바꿈 또는 끝(원질문 안 줄바꿈·따옴표도 글자 그대로 비교된다).
-    // 지시문 없이 시작한 인터뷰는 받지 않는다 — 검색 인터뷰 지시 표지가 문맥에 있어야 한다.
+    // 원질문 확인 = 첫 줄 정확 일치. 원질문은 JSON 문자열로 적는다 — 따옴표·줄바꿈이 이스케이프되어 첫 줄이
+    // 원질문 하나로 끝나므로, 원질문 안의 닫는 따옴표+줄바꿈이 형식의 경계로 읽히지 않는다(부분 일치·날 따옴표
+    // 머리는 지시문 조각·짧은 앞부분으로 다른 질문의 인터뷰를 통과시켰다).
+    // 둘째 줄부터(빈 줄 건너뜀)는 검색 인터뷰 지시문으로 시작해야 한다 — 원질문 칸 안의 표지 글자는 세지 않는다.
     const oq0 = (oq || String(question).trim());
-    const ctx0 = String(iv.initial_context).replace(/^\s+/, '');
-    const head = `원질문: "${oq0}"`;
-    if (!(ctx0 === head || ctx0.startsWith(head + '\n')))
-      throw new Error('인터뷰 initial_context 가 이 원질문으로 시작하지 않는다 — 머리가 «원질문: "<원질문 글자 그대로>"» 다음 줄바꿈이어야 한다. 다른 질문의 인터뷰는 쓸 수 없다');
-    if (!ctx0.includes(INTERVIEW_FRAME_MARK))
-      throw new Error(`인터뷰 initial_context 에 ${INTERVIEW_FRAME_MARK} 가 없다 — 검색 인터뷰 지시문을 붙여 인터뷰를 다시 시작하라(${INTERVIEW_CONTEXT_HOW})`);
+    const lines = String(iv.initial_context).replace(/^\s+/, '').split(/\r?\n/);
+    if (lines[0].replace(/\s+$/, '') !== `원질문: ${JSON.stringify(oq0)}`)
+      throw new Error('인터뷰 initial_context 첫 줄이 이 원질문이 아니다 — 첫 줄은 «원질문: <원질문의 JSON 문자열>» 이어야 한다. 다른 질문의 인터뷰는 쓸 수 없다');
+    if (!lines.slice(1).join('\n').trimStart().startsWith(INTERVIEW_FRAME_MARK))
+      throw new Error(`인터뷰 initial_context 둘째 줄부터가 ${INTERVIEW_FRAME_MARK} 로 시작하지 않는다 — 검색 인터뷰 지시문을 붙여 인터뷰를 다시 시작하라(${INTERVIEW_CONTEXT_HOW})`);
     interview = { ambiguity_score: iv.ambiguity_score, answered_rounds: answered, status: iv.status };
   }
   if (needOC && !ocOut)
@@ -1112,7 +1112,7 @@ function selfTest() {
   // 18a 발동 응답·도구 설명이 검색 인터뷰 지시문 전문을 싣는다(SKILL.md 를 안 읽는 호스트도 같은 지시를 받는다)
   const startDesc = JSON.stringify(TOOLS.find((t) => t.name === 'searchflow_start').inputSchema);
   ok('P-1: 발동 응답·도구 설명에 검색 인터뷰 지시문(원질문 맨 앞 · 제작 사양 ❌ · 한 번에 묶어 묻기)',
-     xMsg.includes(INTERVIEW_FRAME) && xMsg.includes('원질문: "') && startDesc.includes(JSON.stringify(INTERVIEW_FRAME).slice(1, -1))
+     xMsg.includes(INTERVIEW_FRAME) && xMsg.includes(INTERVIEW_CONTEXT_HOW) && xMsg.includes('JSON 문자열') && startDesc.includes(JSON.stringify(INTERVIEW_FRAME).slice(1, -1))
        && INTERVIEW_FRAME.includes('묻지 않는다') && INTERVIEW_FRAME.includes('한 번에'),
      xMsg.includes(INTERVIEW_FRAME) ? 'frame ok' : 'frame 없음');
 
@@ -1234,12 +1234,32 @@ function selfTest() {
   const m29c = rej({ question: '다듬은 질문 F5', salt: 't29c1', gate: { ...G23, operator_clarification: { ...oc23, interview_session_id: IV_H } } });
   const OQ_ML = '첫 줄 "인용" 포함\n둘째 줄';
   const IV_I = 'interview_8888888888888888';
-  mkIv(IV_I, { status: 'completed', score: 0.1, answers: 2, ctx: `원질문: "${OQ_ML}"\n\n` + INTERVIEW_FRAME });
+  mkIv(IV_I, { status: 'completed', score: 0.1, answers: 2, ctx: `원질문: ${JSON.stringify(OQ_ML)}\n\n` + INTERVIEW_FRAME });
   const m29d = rej({ question: '다듬은 질문 F6', salt: 't29c2', gate: { ...G23, original_question: OQ_ML, operator_clarification: { ...oc23, interview_session_id: IV_I } } });
   const m29e = rej({ question: '다듬은 질문 F7', salt: 't29c3', gate: { ...G23, original_question: '첫 줄 "인용" 포함', operator_clarification: { ...oc23, interview_session_id: IV_I } } });
   ok('P-1: 지시문 없는 인터뷰 = 거부 · 여러 줄·따옴표 원질문 = 글자 그대로면 통과, 첫 줄만 내면 거부',
      m29c.includes('[검색 인터뷰 지시]') && m29d === '' && m29e.includes('initial_context'),
      `noframe=${m29c ? 'rej' : 'PASS'} ml=${m29d ? m29d.slice(0, 40) : 'PASS'} ml1=${m29e ? 'rej' : 'PASS'}`);
+
+  // 29d 경계 위장 2종 = 거부: ①따옴표+줄바꿈 든 긴 원질문의 인터뷰를 짧은 앞부분 원질문으로 제출(날 따옴표로 조립한
+  //     문맥 · JSON 으로 조립한 문맥 둘 다) ②원질문 칸에 표지 글자를 넣고 지시문은 안 붙인 인터뷰
+  const OQ_LONG = '합성 수질"\n추가 비교 범위';
+  const IV_J = 'interview_9999999999999999';
+  mkIv(IV_J, { status: 'completed', score: 0.1, answers: 1, ctx: `원질문: "${OQ_LONG}"\n\n` + INTERVIEW_FRAME });
+  const IV_K = 'interview_aaaa000000000000';
+  mkIv(IV_K, { status: 'completed', score: 0.1, answers: 1, ctx: `원질문: ${JSON.stringify(OQ_LONG)}\n\n` + INTERVIEW_FRAME });
+  const OQ_MARK = '합성 문서의 [검색 인터뷰 지시] 표지 뜻';
+  const IV_L = 'interview_bbbb000000000000';
+  mkIv(IV_L, { status: 'completed', score: 0.1, answers: 1, ctx: `원질문: ${JSON.stringify(OQ_MARK)}` });
+  const m29f = [
+    rej({ question: '다듬은 질문 F8', salt: 't29d1', gate: { ...G23, original_question: '합성 수질', operator_clarification: { ...oc23, interview_session_id: IV_J } } }),
+    rej({ question: '다듬은 질문 F9', salt: 't29d2', gate: { ...G23, original_question: '합성 수질', operator_clarification: { ...oc23, interview_session_id: IV_K } } }),
+    rej({ question: '다듬은 질문 F10', salt: 't29d3', gate: { ...G23, original_question: OQ_MARK, operator_clarification: { ...oc23, interview_session_id: IV_L } } }),
+  ];
+  const m29g = rej({ question: '다듬은 질문 F11', salt: 't29d4', gate: { ...G23, original_question: OQ_LONG, operator_clarification: { ...oc23, interview_session_id: IV_K } } });
+  ok('P-1: 경계 위장 = 거부(따옴표+줄바꿈 앞부분 ×2 · 원질문 칸 표지) · 같은 긴 원질문 JSON 머리 = 통과',
+     m29f.every((m) => m.includes('initial_context')) && m29g === '',
+     `${m29f.map((m) => (m ? 'rej' : 'PASS')).join(',')} long=${m29g ? m29g.slice(0, 40) : 'PASS'}`);
 
   // 30 경로 탈출 id = 거부
   const m30 = rej({ question: '다듬은 질문 G', salt: 't30', gate: { ...G23, operator_clarification: { ...oc23, interview_session_id: '../../etc/x' } } });
