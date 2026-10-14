@@ -304,6 +304,7 @@ function assertNoLeak(payload) {
 // 도구 설명·게이트 규칙·거부 응답이 같은 문장을 싣는다 — SKILL.md 를 읽지 않는 호스트(Codex 등)도 같은 지시를 받게.
 // 인터뷰를 검색 질문으로만 묶는다: 우로보로스 인터뷰는 원래 «무엇을 만들지»를 묻는 도구라 그대로 두면
 // 산출물 형식·게시처까지 묻는다. 빈 칸은 한 번에 묶어 묻고 보기를 붙여 회차 수를 줄인다.
+const INTERVIEW_FRAME_MARK = '[검색 인터뷰 지시]';
 const INTERVIEW_FRAME =
   '[검색 인터뷰 지시] 위 원질문은 조사(검색) 질문이다. 이 인터뷰는 «무엇을 찾을지»만 좁힌다 — 무엇을 만들지는 묻지 않는다.\n' +
   '- 물을 칸은 넷뿐: ① 찾을 것(무엇을 알아내려는가) ② 범위(대상·기간·지역·뺄 것) ③ 검색 끝 기준(몇 개·어떤 비교 축이 나오면 조사가 끝인가) ④ 기준일(언제 기준의 사실인가).\n' +
@@ -544,12 +545,16 @@ function gateCheck(gate, question) {
     const answered = (Array.isArray(iv.rounds) ? iv.rounds : [])
       .filter((r) => r && typeof r.user_response === 'string' && r.user_response.trim()).length;
     if (answered < 1) throw new Error('인터뷰에 운영자 답이 없다');
-    // 원질문 확인 = 첫 줄 정확 일치. 부분 일치(includes)는 지시문 조각·한 글자로도 다른 질문의 인터뷰를 통과시켰다.
-    // 옛 꼴(지시문 없이 원질문만 넣은 인터뷰)은 문맥 전체가 원질문과 같을 때만 받는다.
+    // 원질문 확인 = 머리 정확 일치. 부분 일치(includes)는 지시문 조각·한 글자로도 다른 질문의 인터뷰를 통과시켰다.
+    // 머리 = `원질문: "<원질문>"` 뒤에 줄바꿈 또는 끝(원질문 안 줄바꿈·따옴표도 글자 그대로 비교된다).
+    // 지시문 없이 시작한 인터뷰는 받지 않는다 — 검색 인터뷰 지시 표지가 문맥에 있어야 한다.
     const oq0 = (oq || String(question).trim());
-    const ctx0 = String(iv.initial_context);
-    if (ctx0.split('\n', 1)[0].trim() !== `원질문: "${oq0}"` && ctx0.trim() !== oq0)
-      throw new Error('인터뷰 initial_context 가 이 원질문으로 시작하지 않는다 — 첫 줄이 «원질문: "<원질문>"» 이어야 한다. 다른 질문의 인터뷰는 쓸 수 없다');
+    const ctx0 = String(iv.initial_context).replace(/^\s+/, '');
+    const head = `원질문: "${oq0}"`;
+    if (!(ctx0 === head || ctx0.startsWith(head + '\n')))
+      throw new Error('인터뷰 initial_context 가 이 원질문으로 시작하지 않는다 — 머리가 «원질문: "<원질문 글자 그대로>"» 다음 줄바꿈이어야 한다. 다른 질문의 인터뷰는 쓸 수 없다');
+    if (!ctx0.includes(INTERVIEW_FRAME_MARK))
+      throw new Error(`인터뷰 initial_context 에 ${INTERVIEW_FRAME_MARK} 가 없다 — 검색 인터뷰 지시문을 붙여 인터뷰를 다시 시작하라(${INTERVIEW_CONTEXT_HOW})`);
     interview = { ambiguity_score: iv.ambiguity_score, answered_rounds: answered, status: iv.status };
   }
   if (needOC && !ocOut)
@@ -1220,8 +1225,21 @@ function selfTest() {
     rej({ question: '다듬은 질문 F3', salt: 't29b2', gate: { ...G23, original_question: '이', operator_clarification: { ...oc23, interview_session_id: IV_A } } }),
     rej({ question: '다듬은 질문 F4', salt: 't29b3', gate: { ...G23, operator_clarification: { ...oc23, interview_session_id: IV_G } } }),
   ];
-  ok('P-1: 원질문 확인 = 첫 줄 정확 일치(지시문 조각·한 글자·옛 꼴 덧붙임 = 거부)',
+  ok('P-1: 원질문 확인 = 머리 정확 일치(지시문 조각·한 글자·옛 꼴 덧붙임 = 거부)',
      m29b.every((m) => m.includes('initial_context')), m29b.map((m) => (m ? 'rej' : 'PASS')).join(','));
+
+  // 29c 지시문 없이 시작한 인터뷰(원질문만) = 거부 · 줄바꿈·따옴표 든 원질문 = 글자 그대로 머리 일치면 통과
+  const IV_H = 'interview_7777777777777777';
+  mkIv(IV_H, { status: 'completed', score: 0.1, answers: 2, ctx: '원질문: "이거 알아봐 줘"\n\n목표·범위를 좁혀라' });
+  const m29c = rej({ question: '다듬은 질문 F5', salt: 't29c1', gate: { ...G23, operator_clarification: { ...oc23, interview_session_id: IV_H } } });
+  const OQ_ML = '첫 줄 "인용" 포함\n둘째 줄';
+  const IV_I = 'interview_8888888888888888';
+  mkIv(IV_I, { status: 'completed', score: 0.1, answers: 2, ctx: `원질문: "${OQ_ML}"\n\n` + INTERVIEW_FRAME });
+  const m29d = rej({ question: '다듬은 질문 F6', salt: 't29c2', gate: { ...G23, original_question: OQ_ML, operator_clarification: { ...oc23, interview_session_id: IV_I } } });
+  const m29e = rej({ question: '다듬은 질문 F7', salt: 't29c3', gate: { ...G23, original_question: '첫 줄 "인용" 포함', operator_clarification: { ...oc23, interview_session_id: IV_I } } });
+  ok('P-1: 지시문 없는 인터뷰 = 거부 · 여러 줄·따옴표 원질문 = 글자 그대로면 통과, 첫 줄만 내면 거부',
+     m29c.includes('[검색 인터뷰 지시]') && m29d === '' && m29e.includes('initial_context'),
+     `noframe=${m29c ? 'rej' : 'PASS'} ml=${m29d ? m29d.slice(0, 40) : 'PASS'} ml1=${m29e ? 'rej' : 'PASS'}`);
 
   // 30 경로 탈출 id = 거부
   const m30 = rej({ question: '다듬은 질문 G', salt: 't30', gate: { ...G23, operator_clarification: { ...oc23, interview_session_id: '../../etc/x' } } });
@@ -1245,7 +1263,7 @@ function selfTest() {
     const awDate = aw(IV_DATE, 'bot-a');
     process.env.DISCORD_STATE_DIR = 'bot-a';
     const p1x = toolPending().pending.map((p) => p.interview_session_id).sort();
-    mkIv('interview_aaaaaaaaaaaaaaaa', { status: 'completed', score: 0.1, answers: 2, ctx: '이거 알아봐 줘' });
+    mkIv('interview_aaaaaaaaaaaaaaaa', { status: 'completed', score: 0.1, answers: 2, ctx: '원질문: "이거 알아봐 줘"\n\n' + INTERVIEW_FRAME });
     const s32 = toolStart({ question: '다듬은 질문 I', salt: 't32', deadline_source: 'operator',
       gate: { ...G23, operator_clarification: { ...oc23, interview_session_id: 'interview_aaaaaaaaaaaaaaaa' } } });
     const p2x = toolPending().pending.map((p) => p.interview_session_id);
