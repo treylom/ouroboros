@@ -344,6 +344,7 @@ const TOOLS = [
               grade_basis: { type: 'string' },
               discard_reason: { type: 'string' },
               unreachable_reason: { type: 'string', enum: ['blocked', 'not-traced'] },
+              acquired_via: { type: 'string', enum: ['webfetch', 'aside', 'api', 'browser', 'none'], description: '페이지를 연 수단(선택) — aside 단계 기록' },
             },
             required: ['url', 'grade', 'status'],
           },
@@ -389,6 +390,7 @@ function workerBrief(question, frameId, focus, deadline) {
     '취득: 공개된 경로만 쓴다. robots.txt·이용약관·페이월·자동입력 방지는 우회하지 않는다 — 못 읽었으면 못 읽었다고 적는다.',
     '  탐색 순서: 최신 발행분부터 연다. 오래된 자료를 근거로 쓸 때는 더 최신의 정정·후속이 있는지 확인한다.',
     '  2차 자료를 근거로 쓸 때는 원본 링크 추적을 1회 시도하고, 실패하면 "원본 미도달"이라 적는다.',
+    '  페이지 열기 = acquisition.md 사다리. 핵심 출처 원본 확인·WebFetch 실패·JS 렌더는 aside(없으면 건너뛰고 한계 기록) · 로그인/페이월/CAPTCHA/robots·ToS 차단은 aside 로도 열지 않음 · 제출 시 acquired_via(webfetch|aside|api|browser|none) 기록.',
     '',
     '반환: 본 출처를 버린 것까지 전부 findings 파일로 리드에게 돌려준다. MCP 도구를 직접 호출하지 않는다.',
     '  url · claim · verbatim · accessed_at · 확인 가능한 발행일과 반대 증거를 포함한다.',
@@ -510,6 +512,7 @@ function toolSubmit(args) {
     if (!['used', 'discarded', 'unreachable'].includes(s.status)) throw new Error(`status enum 위반: ${s.status}`);
     if (s.stance !== undefined && !['support', 'refute', 'neutral'].includes(s.stance)) throw new Error('stance enum 위반');
     if (s.published !== undefined && parsePublished(s.published) === null) throw new Error('published 날짜 형식 위반');
+    if (s.acquired_via !== undefined && !['webfetch', 'aside', 'api', 'browser', 'none'].includes(s.acquired_via)) throw new Error('acquired_via enum 위반');
     // 축 분리 강제 — ledger schema v1 과 동일 계약
     if (s.grade === 'UNREACHABLE' && !s.unreachable_reason)
       throw new Error('grade=UNREACHABLE 이면 unreachable_reason(blocked|not-traced) 필수');
@@ -902,6 +905,14 @@ function selfTest() {
     try {toolSubmit({session_id:refuted.session_id,frame_id:'f1',sources:[{url:'bad',grade:'A',status:'used',...extra}]});} catch {badSourceCount++;}
   }
   ok('잘못된 stance·published 제출 거부', badSourceCount === 3);
+
+  // 14-b acquired_via(선택 필드) — aside 통과 · enum 밖 값 거부
+  let asideOk = true;
+  try { toolSubmit({session_id:refuted.session_id,frame_id:'f1',sources:[{url:'https://aside-ok',grade:'A',status:'used',acquired_via:'aside'}]}); } catch { asideOk = false; }
+  ok('acquired_via=aside 제출 통과', asideOk);
+  let bogusRejected = false;
+  try { toolSubmit({session_id:refuted.session_id,frame_id:'f1',sources:[{url:'https://aside-bad',grade:'A',status:'used',acquired_via:'bogus'}]}); } catch { bogusRejected = true; }
+  ok('acquired_via=bogus 거부', bogusRejected);
 
   // 15 알 수 없는 도구 = JSON-RPC 오류
   ok('알 수 없는 도구 = -32602',
