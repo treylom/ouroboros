@@ -311,6 +311,8 @@ const INTERVIEW_FRAME =
   '- 조사 결과를 어디에 어떻게 쓸지(영상·글·발표의 길이, 게시처, 화면 구성, 디자인)는 묻지 않는다. 운영자가 먼저 말하면 범위를 정하는 데만 쓰고 되묻지 않는다.\n' +
   '- 비어 있는 칸을 한 메시지에 묶어 한 번에 묻는다(한 칸씩 여러 번 묻지 않는다). 칸마다 고를 수 있는 구체적인 보기 2~3개를 붙인다.\n' +
   '- 네 칸이 다 차면 새 칸을 열지 않는다. 채운 네 칸을 한 줄로 요약해 «이대로 맞나요?» 확인 질문 하나만 한다.';
+const CTX_BEGIN = '<<<INTERVIEW_INITIAL_CONTEXT';
+const CTX_END = 'INTERVIEW_INITIAL_CONTEXT>>>';
 const INTERVIEW_CONTEXT_HOW =
   'initial_context = 첫 줄 «원질문: <원질문의 JSON 문자열>»(원질문을 JSON 문자열로 바꾼 결과를 그대로 — 따옴표·역슬래시·줄바꿈·탭 등 제어 문자가 이스케이프되어 한 줄이 된다 · 한글 등 보통 글자는 그대로) + 빈 줄 + 아래 [검색 인터뷰 지시] 전문(고치지 않고 그대로).';
 
@@ -330,7 +332,7 @@ const TOOLS = [
         type: { type: 'string', enum: Object.keys(TYPES), description: 'Optional. Pin the research type instead of deriving it from the question text. Omit to route normally.' },
         gate: {
           type: 'object',
-          description: 'P-1 ambiguity-gate clearance (REQUIRED by the handler — the server refuses to enter P0 without it). Grade the question on four items per SKILL.md §P-1, each O/X with one-line evidence. If any item is X, do not start research — start ouroboros_interview with initial_context = a first line \'원질문: <the original question as a JSON string literal>\' (usually just the question in double quotes; quotes, line breaks and backslashes escaped), a blank line, then this search-interview frame verbatim:\n' + INTERVIEW_FRAME + '\n— and relay every question it asks to the operator (SKILL.md §4 operator channel ladder; no wait limit; never answer on the operator\'s behalf). After the interview completes, re-grade the refined question and include operator_clarification. Always include initial_verdicts (the first grading).',
+          description: 'P-1 ambiguity-gate clearance (REQUIRED by the handler — the server refuses to enter P0 without it). Grade the question on four items per SKILL.md §P-1, each O/X with one-line evidence. If any item is X, do not start research — call searchflow_start with the X grading: the gate response carries the complete initial_context between ' + CTX_BEGIN + ' and ' + CTX_END + '. Start ouroboros_interview with exactly that text, character for character (do not summarize, translate or shorten it; it is the original question as a JSON string on the first line, a blank line, then this search-interview frame:\n' + INTERVIEW_FRAME + '\n). Record each interview question with searchflow_await_operator before relaying it, then relay every question it asks to the operator (SKILL.md §4 operator channel ladder; no wait limit; never answer on the operator\'s behalf). After the interview completes, re-grade the refined question and include operator_clarification. Always include initial_verdicts (the first grading).',
           properties: {
             verdicts: {
               type: 'object',
@@ -416,11 +418,12 @@ const TOOLS = [
   },
   {
     name: 'searchflow_await_operator',
-    description: 'Record that an interview question was sent to the operator and the lead is now waiting. Call this right after relaying each question, then end the turn. searchflow_pending lists these so the lead can resume after a restart.',
+    description: 'Record an interview question for the operator and check the interview first. Call this BEFORE relaying each question: the server checks that the interview was opened with the exact initial_context the gate gave (original question + search-interview frame). If it refuses, do not send the question — open a new interview with the text it returns and record again. After it succeeds, relay the question to the operator and end the turn. searchflow_pending lists these so the lead can resume after a restart.',
     inputSchema: {
       type: 'object',
       properties: {
         question: { type: 'string', description: 'The research question being clarified.' },
+        original_question: { type: 'string', description: 'The original question as first asked (the one on the interview\'s first line). Omit if it is the same as question.' },
         interview_session_id: { type: 'string' },
         last_question: { type: 'string', description: 'The interview question just relayed to the operator.' },
         asked_via: { type: 'string' },
@@ -481,6 +484,23 @@ const GATE_ITEM_KO = {
   goal: '① 할 일(목표 동사)', scope: '② 대상 범위 한정',
   done: '③ 완료 판정 기준', constraints: '④ 제약((a) 크기·(b) 정답분기 — 판정 = (b) 단독)',
 };
+function interviewContextFor(originalQuestion) {
+  return `원질문: ${JSON.stringify(originalQuestion)}\n\n${INTERVIEW_FRAME}`;
+}
+// 원질문 확인 = 첫 줄 정확 일치(원질문은 JSON 문자열 — 따옴표·줄바꿈이 이스케이프되어 원질문 안의 닫는 따옴표+줄바꿈이
+// 형식 경계로 읽히지 않는다). 둘째 줄부터는 지시문 «전문»과 같아야 한다(공백·줄바꿈 차이만 무시) — 표지로 «시작»만 보면
+// 날 따옴표로 적은 긴 원질문의 뒷부분이 표지로 이어질 때 짧은 다른 원질문의 인터뷰로 통과했다(3차 보안 F·G·H / T3).
+// 인터뷰 끝(searchflow_start)과 첫 질문 전달 전(searchflow_await_operator) 두 곳에서 같은 식으로 본다.
+function checkInterviewContext(iv, oq0) {
+  const how = `ouroboros_interview 를 새로 열 때 initial_context 에는 아래 글을 한 글자도 바꾸지 말고 그대로 넣는다:\n${CTX_BEGIN}\n${interviewContextFor(oq0)}\n${CTX_END}`;
+  const lines = String(iv.initial_context ?? '').replace(/^\s+/, '').split(/\r?\n/);
+  if (lines[0].replace(/\s+$/, '') !== `원질문: ${JSON.stringify(oq0)}`)
+    throw new Error(`인터뷰 initial_context 첫 줄이 이 원질문이 아니다 — 첫 줄은 «원질문: <원질문의 JSON 문자열>» 이어야 한다. 다른 질문의 인터뷰는 쓸 수 없다.\n${how}`);
+  const squash = (s) => String(s).replace(/\s+/g, ' ').trim();
+  if (squash(lines.slice(1).join('\n')) !== squash(INTERVIEW_FRAME))
+    throw new Error(`인터뷰 initial_context 둘째 줄부터가 ${INTERVIEW_FRAME_MARK} 지시문 전문과 같지 않다(${INTERVIEW_CONTEXT_HOW}).\n${how}`);
+}
+
 // spec §1 채점 규칙 — SKILL.md §P-1 과 2벌이다(서버 직행 호출자도 규칙을 받게). 한쪽을 고치면 대조할 것.
 const GATE_RULES = [
   '③완료기준 유계성(K1): ③ = O iff ①할 일 + ②범위 + ④(a) 크기 제약 «문면»이 합쳐져 「무엇을 하면 끝인가」와 「답의 최대 크기」가 함께 유계. 별도 수락시험·산출형식은 요구하지 않는다. 「여러/몇 개」류 anchor 없는 맨 수량어(「여러 대안」·「사례가 많다」)가 답 크기를 무계로 만들면 X.',
@@ -514,8 +534,14 @@ function gateCheck(gate, question) {
     throw new Error(`gate.self_interview_rounds 위반: ${JSON.stringify(gate.self_interview_rounds)} — 0 만 허용(셀프 인터뷰 폐기 · 운영자 인터뷰가 대신함)`);
   const failed = GATE_ITEMS.filter((k) => v[k] === 'X');
   if (failed.length) {
+    // 인터뷰 시작 문맥은 서버가 조립해 준다 — 호스트에게 긴 지시문을 베끼게 하면 SKILL 없는 호스트가 자기 말로 줄여
+    // 넣었고(0.55.7 실측 · Claude 호스트), 그 인터뷰는 끝에서 거부돼 운영자 왕복을 버리게 된다.
+    const oqNow = (typeof gate.original_question === 'string' && gate.original_question.trim()) || String(question).trim();
+    const readyCtx = interviewContextFor(oqNow);
     throw new Error(
-      `P-1 게이트 발동 — 미달 항목: ${failed.map((k) => GATE_ITEM_KO[k]).join(' · ')}.\n조사 시작 ❌ — 지금 ouroboros_interview 를 시작해 그 질문을 운영자에게 전달하라(창구 사다리 SKILL.md §4 · 대기 시간 상한 없음). 봇이 대신 답하지 않는다.\n${GATE_RULES}`,
+      `P-1 게이트 발동 — 미달 항목: ${failed.map((k) => GATE_ITEM_KO[k]).join(' · ')}.\n조사 시작 ❌ — 지금 ouroboros_interview 를 시작해 그 질문을 운영자에게 전달하라(창구 사다리 SKILL.md §4 · 대기 시간 상한 없음). 봇이 대신 답하지 않는다.\n` +
+      `ouroboros_interview 의 initial_context 에는 아래 ${CTX_BEGIN} 와 ${CTX_END} 사이 글을 한 글자도 바꾸지 말고 그대로 넣는다(요약·번역·줄임 ❌ — 바꾸면 인터뷰가 끝난 뒤 게이트가 거부한다). 나중에 낼 gate.original_question 은 ${JSON.stringify(oqNow)} 이다.\n` +
+      `${CTX_BEGIN}\n${readyCtx}\n${CTX_END}\n${GATE_RULES}`,
     );
   }
   const iv0 = gate.initial_verdicts;
@@ -550,13 +576,7 @@ function gateCheck(gate, question) {
     // 머리는 지시문 조각·짧은 앞부분으로 다른 질문의 인터뷰를 통과시켰다).
     // 둘째 줄부터는 검색 인터뷰 지시문 «전문»과 같아야 한다(공백·줄바꿈 차이만 무시). 표지로 «시작»만 보면, 날 따옴표로
     // 적은 긴 원질문의 뒷부분이 표지 글자로 이어질 때 짧은 다른 원질문의 인터뷰로 통과했다(3차 보안 F·G·H / T3).
-    const oq0 = (oq || String(question).trim());
-    const lines = String(iv.initial_context).replace(/^\s+/, '').split(/\r?\n/);
-    if (lines[0].replace(/\s+$/, '') !== `원질문: ${JSON.stringify(oq0)}`)
-      throw new Error('인터뷰 initial_context 첫 줄이 이 원질문이 아니다 — 첫 줄은 «원질문: <원질문의 JSON 문자열>» 이어야 한다. 다른 질문의 인터뷰는 쓸 수 없다');
-    const squash = (s) => String(s).replace(/\s+/g, ' ').trim();
-    if (squash(lines.slice(1).join('\n')) !== squash(INTERVIEW_FRAME))
-      throw new Error(`인터뷰 initial_context 둘째 줄부터가 ${INTERVIEW_FRAME_MARK} 지시문 전문과 같지 않다 — 첫 줄 원질문 뒤에는 빈 줄과 지시문 전문만 붙여(고치지 않고 그대로) 인터뷰를 다시 시작하라(${INTERVIEW_CONTEXT_HOW})`);
+    checkInterviewContext(iv, oq || String(question).trim());
     interview = { ambiguity_score: iv.ambiguity_score, answered_rounds: answered, status: iv.status };
   }
   if (needOC && !ocOut)
@@ -778,6 +798,11 @@ function toolAwaitOperator(args) {
   }
   const id = args.interview_session_id.trim();
   if (!INTERVIEW_ID_RE.test(id)) throw new Error(`interview_session_id 형식 위반: ${JSON.stringify(id)}`);
+  // 첫 질문을 운영자에게 보내기 «전»에 인터뷰 시작 문맥을 본다 — 틀린 인터뷰는 끝에서 거부되므로, 여기서 돌려보내야
+  // 운영자 왕복을 버리지 않는다. 원질문 = original_question(있으면) 아니면 question.
+  const oqA = (typeof args.original_question === 'string' && args.original_question.trim()) || args.question.trim();
+  try { checkInterviewContext(readInterview(id), oqA); }
+  catch (e) { throw new Error(`운영자에게 아직 보내지 마라 — ${e.message}\n이 인터뷰는 버리고, 위 글로 새 인터뷰를 열어 그 첫 질문을 다시 기록한 뒤 보낸다.`); }
   appendFileSync(join(pendingDir(), `${id}.jsonl`), JSON.stringify({
     event: 'awaiting_operator', schema_version: '1', interview_session_id: id,
     question: args.question.trim(), last_question: args.last_question.trim(),
@@ -1303,6 +1328,8 @@ function selfTest() {
   try {
     process.env.SEARCHFLOW_STATE_DIR = mkdtempSync(join(tmpdir(), 'sf-st-'));
     const IV_DATE = 'interview_20000101_000000';
+    for (const id of ['interview_aaaaaaaaaaaaaaaa', 'interview_bbbbbbbbbbbbbbbb', IV_DATE])
+      mkIv(id, { status: 'in_progress', score: 0.5, answers: 0, ctx: interviewContextFor('이거 알아봐 줘') });
     const aw = (id, bot) => { process.env.DISCORD_STATE_DIR = bot; return toolAwaitOperator({ question: '이거 알아봐 줘', interview_session_id: id, last_question: '범위는?', asked_via: 'operator-dm', asked_at: '2026-10-13T10:00:00Z' }); };
     aw('interview_aaaaaaaaaaaaaaaa', 'bot-a');
     aw('interview_bbbbbbbbbbbbbbbb', 'bot-b');
@@ -1322,6 +1349,32 @@ function selfTest() {
     if (saveBot === undefined) delete process.env.DISCORD_STATE_DIR; else process.env.DISCORD_STATE_DIR = saveBot;
   }
   ok('재개: await_operator 기록 · pending bot 필터 · 날짜 꼴 id · start 통과 시 목록에서 빠짐', r32, d32);
+
+  // 32b 첫 질문 전달 «전» 검사(0.55.7 호스트 실측: Claude 호스트가 지시문을 자기 말로 줄여 넣음) —
+  //   ① 게이트 X 응답에 서버가 조립한 initial_context 완성 글이 표지 사이에 그대로 실림
+  //   ② 줄인 문맥으로 연 인터뷰는 await_operator 가 «보내지 마라»로 거부 + 대기 기록 0 + 거부 글에 완성 글 동봉
+  //   ③ 완성 글 그대로 연 인터뷰는 기록됨 · original_question 칸이 question 보다 우선
+  const save2 = process.env.SEARCHFLOW_STATE_DIR;
+  let r32b = false, d32b = '';
+  try {
+    process.env.SEARCHFLOW_STATE_DIR = mkdtempSync(join(tmpdir(), 'sf-st-'));
+    const Q = '그거 요즘 시세 "어때"?';
+    const xg = rej({ question: Q, salt: 't32b0', gate: { verdicts: { ...G23.verdicts, scope: 'X' }, evidence: G23.evidence } });
+    const block = xg.split(CTX_BEGIN + '\n')[1]?.split('\n' + CTX_END)[0];
+    const IV_SHORT = 'interview_dddd000000000001', IV_OK = 'interview_dddd000000000002';
+    mkIv(IV_SHORT, { status: 'in_progress', score: 0.5, answers: 0, ctx: '원질문: 그거 요즘 시세 "어때"?\n\n이건 조사 질문이다 — 목표·범위·끝 기준·기준일을 좁혀라.' });
+    mkIv(IV_OK, { status: 'in_progress', score: 0.5, answers: 0, ctx: block ?? '' });
+    let shortErr = '';
+    try { toolAwaitOperator({ question: '다듬은 것', original_question: Q, interview_session_id: IV_SHORT, last_question: '무엇?', asked_via: 'operator-dm', asked_at: '2026-10-14T15:00:00Z' }); }
+    catch (e) { shortErr = e.message; }
+    const okRec = toolAwaitOperator({ question: '다듬은 것', original_question: Q, interview_session_id: IV_OK, last_question: '무엇?', asked_via: 'operator-dm', asked_at: '2026-10-14T15:00:00Z' });
+    const ids = toolPending().pending.map((p) => p.interview_session_id);
+    r32b = block === interviewContextFor(Q) && shortErr.includes('보내지 마라') && shortErr.includes(interviewContextFor(Q)) &&
+           okRec.ok === true && ids.includes(IV_OK) && !ids.includes(IV_SHORT);
+    d32b = `block=${block === interviewContextFor(Q)} short=${shortErr ? shortErr.slice(0, 30) : 'PASS'} ids=${JSON.stringify(ids)}`;
+  } catch (e) { d32b = e.message; }
+  finally { if (save2 === undefined) delete process.env.SEARCHFLOW_STATE_DIR; else process.env.SEARCHFLOW_STATE_DIR = save2; }
+  ok('P-1: 게이트 X 응답 = 완성 initial_context 동봉 · 줄인 문맥 인터뷰 = 전달 전 거부(기록 0) · 완성 글 그대로 = 기록', r32b, d32b);
 
   INTERVIEW_DATA_DIR = REAL_INTERVIEW_DIR;
 
