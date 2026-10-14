@@ -20,7 +20,8 @@ const REQUIRED = [
   'schema_version', 'run_id', 'frame_id', 'source_id',
   'url', 'claim', 'grade', 'grade_basis', 'accessed_at', 'status',
 ];
-const OPTIONAL = new Set(['verbatim', 'discard_reason', 'unreachable_reason']);
+const OPTIONAL = new Set(['verbatim', 'discard_reason', 'unreachable_reason', 'acquired_via']);
+const ACQUIRED_VIA = new Set(['webfetch', 'aside', 'api', 'browser', 'none']);
 // UNREACHABLE 은 **두 사실을 한 이름으로 덮고 있었다** — 차단당해 못 갔는가(존중해 멈춤),
 // 시한 안에 못 쫓았는가(시간을 더 주면 풀림). 처분이 다르다.
 // 실측으로 걸렸다: 워커가 enum 으로 못 적으니 그 구분을 **산문에** 넣었다.
@@ -81,6 +82,9 @@ export function validateLedger(text) {
     }
     if ('status' in rec && !STATUSES.has(rec.status)) {
       violations.push(`${lineNo}: status enum 위반 — ${[...STATUSES].join('|')} (받은 값: ${JSON.stringify(rec.status)})`);
+    }
+    if ('acquired_via' in rec && !ACQUIRED_VIA.has(rec.acquired_via)) {
+      violations.push(`${lineNo}: acquired_via enum 위반 — ${[...ACQUIRED_VIA].join('|')} (받은 값: ${JSON.stringify(rec.acquired_via)})`);
     }
     if (typeof rec.accessed_at === 'string' && !ISO_OFFSET.test(rec.accessed_at)) {
       violations.push(`${lineNo}: accessed_at 은 ISO-8601+offset 이어야 함 (받은 값: ${rec.accessed_at})`);
