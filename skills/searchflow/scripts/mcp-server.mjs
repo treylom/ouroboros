@@ -299,6 +299,20 @@ function assertNoLeak(payload) {
 }
 
 // ── 도구 ──────────────────────────────────────────────────────────────────
+// 운영자 인터뷰 시작 지시문 — P-1 이 X 일 때 ouroboros_interview 의 initial_context 에 넣는 글.
+// 원질문을 맨 앞에 글자 그대로 두고(서버가 인터뷰 기록에서 원질문 포함을 확인한다) 이 지시문을 뒤에 붙인다.
+// 도구 설명·게이트 규칙·거부 응답이 같은 문장을 싣는다 — SKILL.md 를 읽지 않는 호스트(Codex 등)도 같은 지시를 받게.
+// 인터뷰를 검색 질문으로만 묶는다: 우로보로스 인터뷰는 원래 «무엇을 만들지»를 묻는 도구라 그대로 두면
+// 산출물 형식·게시처까지 묻는다. 빈 칸은 한 번에 묶어 묻고 보기를 붙여 회차 수를 줄인다.
+const INTERVIEW_FRAME =
+  '[검색 인터뷰 지시] 위 원질문은 조사(검색) 질문이다. 이 인터뷰는 «무엇을 찾을지»만 좁힌다 — 무엇을 만들지는 묻지 않는다.\n' +
+  '- 물을 칸은 넷뿐: ① 찾을 것(무엇을 알아내려는가) ② 범위(대상·기간·지역·뺄 것) ③ 검색 끝 기준(몇 개·어떤 비교 축이 나오면 조사가 끝인가) ④ 기준일·시한.\n' +
+  '- 조사 결과를 어디에 어떻게 쓸지(영상·글·발표의 길이, 게시처, 화면 구성, 디자인)는 묻지 않는다. 운영자가 먼저 말하면 범위를 정하는 데만 쓰고 되묻지 않는다.\n' +
+  '- 비어 있는 칸을 한 메시지에 묶어 한 번에 묻는다(한 칸씩 여러 번 묻지 않는다). 칸마다 고를 수 있는 구체적인 보기 2~3개를 붙인다.\n' +
+  '- 네 칸이 다 차면 더 묻지 않는다.';
+const INTERVIEW_CONTEXT_HOW =
+  'initial_context = 첫 줄 «원질문: "<원질문 글자 그대로>"» + 빈 줄 + 아래 [검색 인터뷰 지시] 전문(고치지 않고 그대로).';
+
 const TOOLS = [
   {
     name: 'searchflow_start',
@@ -315,7 +329,7 @@ const TOOLS = [
         type: { type: 'string', enum: Object.keys(TYPES), description: 'Optional. Pin the research type instead of deriving it from the question text. Omit to route normally.' },
         gate: {
           type: 'object',
-          description: 'P-1 ambiguity-gate clearance (REQUIRED by the handler — the server refuses to enter P0 without it). Grade the question on four items per SKILL.md §P-1, each O/X with one-line evidence. If any item is X, do not start research — start ouroboros_interview with the original question as initial_context and relay every question it asks to the operator (SKILL.md §4 operator channel ladder; no wait limit; never answer on the operator\'s behalf). After the interview completes, re-grade the refined question and include operator_clarification. Always include initial_verdicts (the first grading).',
+          description: 'P-1 ambiguity-gate clearance (REQUIRED by the handler — the server refuses to enter P0 without it). Grade the question on four items per SKILL.md §P-1, each O/X with one-line evidence. If any item is X, do not start research — start ouroboros_interview with initial_context = a first line \'원질문: "<the original question verbatim>"\', a blank line, then this search-interview frame verbatim:\n' + INTERVIEW_FRAME + '\n— and relay every question it asks to the operator (SKILL.md §4 operator channel ladder; no wait limit; never answer on the operator\'s behalf). After the interview completes, re-grade the refined question and include operator_clarification. Always include initial_verdicts (the first grading).',
           properties: {
             verdicts: {
               type: 'object',
@@ -473,7 +487,8 @@ const GATE_RULES = [
   '④′ 제약 2종 분리 + 판정 순서(상호 참조 0): step 1 — 문면의 제약 후보에 역할 태그(배타 파티션 ❌·한 제약이 두 역할 겸행 가능): (a) 크기 제약(시한·형식·분량 — 독립 감점 ❌·③ 유계 판정의 입력으로만) / (b) 정답분기 제약(기준일·관할·대상 버전·안전 조건 등 — 답 «크기»는 안 바꾸나 «어느 답이 맞는지»를 바꾸는 파라미터). ④ 의 O/X = (b) 기준 단독: 과제 성격상 정답분기 파라미터가 필요한데 문면에 없으면 X — 면제 불가. 판별선 = 암묵 현재/불요(발주 시점 «지금» 상태 조사 — ④(b) 불요 = O) vs 명시 필요(기준시점·관할·버전이 정답을 가르는 과제 — 부재 = X). step 2 — ③ 유계 판정은 ① + ② + ④(a) «문면»만 입력(④ 판정 결과 참조 ❌).',
   '㉮ 지시대명사 세칙: 문면 안에서 선행 지시 대상이 해소되지 않는 지시대명사(「이거·그거·이들」) = ② X 고정 — 수신자가 발주자 머릿속 컨텍스트를 공유한다고 가정하지 않는다(추론 해소 ❌).',
   '내부 미지 구분: 조사로 밝힐 대상의 «내부 미지»(예: 어느 요금제가 있는지)는 게이트 트리거가 아니다 — 발주가 그 미지를 조사 과제로 지정했으면 O.',
-  '통과 = 4항목 전부 O(점수 = 명확도, 높을수록 명확). 하나라도 X = 조사 시작 ❌ — 지금 ouroboros_interview 를 시작해(initial_context = 원질문) 인터뷰가 낸 질문을 운영자에게 하나도 빠짐없이 그대로 전달한다(창구 사다리 SKILL.md §4 · 대기 시간 상한 없음 · 봇이 대신 답하지 않는다). 인터뷰가 완료되면 다듬은 질문을 다시 채점하고 gate.operator_clarification(interview_session_id 포함)을 함께 제출한다. 첫 채점 gate.initial_verdicts 는 언제나 함께 낸다.',
+  '통과 = 4항목 전부 O(점수 = 명확도, 높을수록 명확). 하나라도 X = 조사 시작 ❌ — 지금 ouroboros_interview 를 시작해(' + INTERVIEW_CONTEXT_HOW + ') 인터뷰가 낸 질문을 운영자에게 하나도 빠짐없이 그대로 전달한다(창구 사다리 SKILL.md §4 · 대기 시간 상한 없음 · 봇이 대신 답하지 않는다). 인터뷰가 완료되면 다듬은 질문을 다시 채점하고 gate.operator_clarification(interview_session_id 포함)을 함께 제출한다. 첫 채점 gate.initial_verdicts 는 언제나 함께 낸다.',
+  INTERVIEW_FRAME,
 ].join('\n');
 
 function gateCheck(gate, question) {
@@ -1086,6 +1101,12 @@ function selfTest() {
   ok('P-1: 일부 X = 발동 + 미달 항목 지목 + 인터뷰 시작 지시(셀프 인터뷰 해소 ❌)',
      xMsg.includes('발동') && xMsg.includes('② 대상 범위') && xMsg.includes('③ 완료 판정') && xMsg.includes('ouroboros_interview') && !xMsg.includes('다시 호출'),
      xMsg.slice(0, 60));
+  // 18a 발동 응답·도구 설명이 검색 인터뷰 지시문 전문을 싣는다(SKILL.md 를 안 읽는 호스트도 같은 지시를 받는다)
+  const startDesc = JSON.stringify(TOOLS.find((t) => t.name === 'searchflow_start').inputSchema);
+  ok('P-1: 발동 응답·도구 설명에 검색 인터뷰 지시문(원질문 맨 앞 · 제작 사양 ❌ · 한 번에 묶어 묻기)',
+     xMsg.includes(INTERVIEW_FRAME) && xMsg.includes('원질문: "') && startDesc.includes(JSON.stringify(INTERVIEW_FRAME).slice(1, -1))
+       && INTERVIEW_FRAME.includes('묻지 않는다') && INTERVIEW_FRAME.includes('한 번에'),
+     xMsg.includes(INTERVIEW_FRAME) ? 'frame ok' : 'frame 없음');
 
   // 18b 3회 소진 후 미달 = 조사 시작 불가·운영자 질문 지시 (A7·A11)
   let spentMsg = '';
