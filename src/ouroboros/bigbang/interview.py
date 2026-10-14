@@ -11,6 +11,7 @@ from enum import StrEnum
 import functools
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from pydantic import BaseModel, Field, model_validator
 import structlog
@@ -914,7 +915,11 @@ class InterviewEngine:
             return Result.err(ValidationError(error_msg, field="initial_context"))
 
         if interview_id is None:
-            interview_id = f"interview_{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}"
+            # Same shape as the MCP handler / PM / auto-driver ids.  A
+            # second-resolution timestamp collided when two callers sharing
+            # a state dir started within the same second, and the later
+            # save overwrote the earlier caller's state file.
+            interview_id = f"interview_{uuid4().hex[:16]}"
 
         state = InterviewState(
             interview_id=interview_id,
