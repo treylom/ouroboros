@@ -544,9 +544,12 @@ function gateCheck(gate, question) {
     const answered = (Array.isArray(iv.rounds) ? iv.rounds : [])
       .filter((r) => r && typeof r.user_response === 'string' && r.user_response.trim()).length;
     if (answered < 1) throw new Error('인터뷰에 운영자 답이 없다');
+    // 원질문 확인 = 첫 줄 정확 일치. 부분 일치(includes)는 지시문 조각·한 글자로도 다른 질문의 인터뷰를 통과시켰다.
+    // 옛 꼴(지시문 없이 원질문만 넣은 인터뷰)은 문맥 전체가 원질문과 같을 때만 받는다.
     const oq0 = (oq || String(question).trim());
-    if (!String(iv.initial_context).includes(oq0))
-      throw new Error('인터뷰 initial_context 에 원질문이 없다 — 다른 질문의 인터뷰는 쓸 수 없다');
+    const ctx0 = String(iv.initial_context);
+    if (ctx0.split('\n', 1)[0].trim() !== `원질문: "${oq0}"` && ctx0.trim() !== oq0)
+      throw new Error('인터뷰 initial_context 가 이 원질문으로 시작하지 않는다 — 첫 줄이 «원질문: "<원질문>"» 이어야 한다. 다른 질문의 인터뷰는 쓸 수 없다');
     interview = { ambiguity_score: iv.ambiguity_score, answered_rounds: answered, status: iv.status };
   }
   if (needOC && !ocOut)
@@ -1153,7 +1156,7 @@ function selfTest() {
 
   // 23 initial_verdicts X + 다듬은 질문 + operator_clarification 5칸(실제 인터뷰 상태 파일 검증) = 통과·원장 보존
   const IV_A = 'interview_0123456789abcdef';
-  mkIv(IV_A, { status: 'completed', score: 0.17, answers: 2, ctx: '원질문: 이거 알아봐 줘 · 조사 질문' });
+  mkIv(IV_A, { status: 'completed', score: 0.17, answers: 2, ctx: '원질문: "이거 알아봐 줘"\n\n' + INTERVIEW_FRAME });
   const oc23 = { interview_session_id: IV_A, asked_via: 'operator-dm', asked_at: '10:00', answered_at: '10:05', answer_summary: '범위 확정' };
   const IV_X = { goal: 'O', scope: 'X', done: 'O', constraints: 'O' };
   const G23 = { ...G4, initial_verdicts: IV_X, original_question: '이거 알아봐 줘', operator_clarification: oc23 };
@@ -1206,6 +1209,19 @@ function selfTest() {
   mkIv(IV_D, { status: 'completed', score: 0.1, answers: 2, ctx: '전혀 다른 질문' });
   const m29 = rej({ question: '다듬은 질문 F', salt: 't29', gate: { ...G23, operator_clarification: { ...oc23, interview_session_id: IV_D } } });
   ok('P-1: 인터뷰 initial_context 에 원질문 없음 = 거부', m29.includes('initial_context'), m29.slice(0, 60));
+
+  // 29b 원질문 확인 = 첫 줄 정확 일치 — 부분 일치 꼴 3종 거부(지시문 조각 · 한 글자 · 옛 꼴 덧붙임)
+  const IV_F = 'interview_5555555555555555';
+  mkIv(IV_F, { status: 'completed', score: 0.1, answers: 2, ctx: '원질문: "전혀 다른 질문"\n\n' + INTERVIEW_FRAME });
+  const IV_G = 'interview_6666666666666666';
+  mkIv(IV_G, { status: 'completed', score: 0.1, answers: 2, ctx: '이거 알아봐 줘 · 덧붙임' });
+  const m29b = [
+    rej({ question: '다듬은 질문 F2', salt: 't29b1', gate: { ...G23, original_question: '무엇을 찾을지', operator_clarification: { ...oc23, interview_session_id: IV_F } } }),
+    rej({ question: '다듬은 질문 F3', salt: 't29b2', gate: { ...G23, original_question: '이', operator_clarification: { ...oc23, interview_session_id: IV_A } } }),
+    rej({ question: '다듬은 질문 F4', salt: 't29b3', gate: { ...G23, operator_clarification: { ...oc23, interview_session_id: IV_G } } }),
+  ];
+  ok('P-1: 원질문 확인 = 첫 줄 정확 일치(지시문 조각·한 글자·옛 꼴 덧붙임 = 거부)',
+     m29b.every((m) => m.includes('initial_context')), m29b.map((m) => (m ? 'rej' : 'PASS')).join(','));
 
   // 30 경로 탈출 id = 거부
   const m30 = rej({ question: '다듬은 질문 G', salt: 't30', gate: { ...G23, operator_clarification: { ...oc23, interview_session_id: '../../etc/x' } } });
