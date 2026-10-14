@@ -18,7 +18,7 @@
 //
 // 외부 패키지 0 (node: 내장만). 기존 동봉 스크립트 재사용 = 포장 교체(재작성 ❌).
 
-import { readFileSync, writeFileSync, mkdirSync, chmodSync, existsSync, appendFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, chmodSync, existsSync, appendFileSync, readdirSync, mkdtempSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
@@ -112,6 +112,30 @@ function stateDir() {
 }
 
 const sessionPath = (id) => join(stateDir(), `${id}.jsonl`);
+
+// ── 운영자 인터뷰 상태 (ouroboros_interview 가 쓰는 파일을 읽기만 한다) ─────────
+// selfTest 만 이 변수를 임시 폴더로 바꿨다가 되돌린다. 환경변수·인자로 바꾸는 길은 없다.
+let INTERVIEW_DATA_DIR = join(homedir(), '.ouroboros', 'data');
+const INTERVIEW_ID_RE = /^interview_[A-Za-z0-9_]{1,64}$/;
+
+function readInterview(id) {
+  if (typeof id !== 'string' || !INTERVIEW_ID_RE.test(id))
+    throw new Error(`interview_session_id 형식 위반: ${JSON.stringify(id)}`);
+  const p = join(INTERVIEW_DATA_DIR, `interview_${id}.json`);
+  if (!existsSync(p))
+    throw new Error('인터뷰 상태 파일 없음 — ouroboros_interview 로 운영자 인터뷰를 끝낸 뒤 그 id 를 넣어라');
+  try { return JSON.parse(readFileSync(p, 'utf8')); }
+  catch (e) { throw new Error(`인터뷰 상태 파일 파싱 실패: ${e.message}`); }
+}
+
+// ── 운영자 대기 목록 (재개 장치) ──────────────────────────────────────────
+function pendingDir() {
+  const d = join(stateDir(), '_pending');
+  mkdirSync(d, { recursive: true, mode: 0o700 });
+  try { chmodSync(d, 0o700); }
+  catch (e) { process.stderr.write(`[searchflow] pending dir chmod 0700 failed: ${e.message}\n`); }
+  return d;
+}
 
 /** 매 도구 호출을 append — "검증했다"가 주장이 아니라 원장이 되게. */
 // bot 필드 규칙 = km-search-receipt.py:57 과 동일: DISCORD_STATE_DIR 원문(없으면 '').
@@ -286,11 +310,12 @@ const TOOLS = [
         salt: { type: 'string', description: 'Optional disambiguator when starting two sessions on the same question' },
         // ⚠️ 예시에 숫자를 쓰지 않는다 — 워커가 보는 표면의 숫자는 전부 심판이 붙잡을 앵커가 된다.
         //    첫 판에 "20 minutes from now" 를 넣었다가 말뭉치 수 토큰에 20 이 새로 생겼다(위반은 아니나 불필요).
+        deadline_source: { type: 'string', enum: ['operator', 'default'], description: 'Where the deadline came from: the operator answered, or the default (start + 30 minutes) was used because no channel reached the operator. Omitted means default.' },
         deadline: { type: 'string', description: 'Wall-clock cutoff to hand each worker, as a plain phrase. Workers return partial results at the cutoff.' },
         type: { type: 'string', enum: Object.keys(TYPES), description: 'Optional. Pin the research type instead of deriving it from the question text. Omit to route normally.' },
         gate: {
           type: 'object',
-          description: 'P-1 ambiguity-gate clearance (REQUIRED by the handler — the server refuses to enter P0 without it). Grade the question on four items per SKILL.md §P-1, each O/X with one-line evidence. If any item is X, run the self-interview (max 3 rounds) and re-grade before calling again.',
+          description: 'P-1 ambiguity-gate clearance (REQUIRED by the handler — the server refuses to enter P0 without it). Grade the question on four items per SKILL.md §P-1, each O/X with one-line evidence. If any item is X, do not start research — start ouroboros_interview with the original question as initial_context and relay every question it asks to the operator (SKILL.md §4 operator channel ladder; no wait limit; never answer on the operator\'s behalf). After the interview completes, re-grade the refined question and include operator_clarification. Always include initial_verdicts (the first grading).',
           properties: {
             verdicts: {
               type: 'object',
@@ -312,10 +337,22 @@ const TOOLS = [
               },
               required: ['goal', 'scope', 'done', 'constraints'],
             },
-            original_question: { type: 'string', description: 'The question as first received, before any self-interview refinement.' },
-            self_interview_rounds: { type: 'integer', minimum: 0, maximum: 3, description: 'How many self-interview rounds were spent refining the question (0 if none).' },
+            original_question: { type: 'string', description: 'The question as first received, before any refinement.' },
+            initial_verdicts: {
+              type: 'object',
+              description: 'Required. The first grading, before any operator interview (same as verdicts when the question was clear from the start). Any X here means the operator interview was required.',
+              properties: {
+                goal: { type: 'string', enum: ['O', 'X'] },
+                scope: { type: 'string', enum: ['O', 'X'] },
+                done: { type: 'string', enum: ['O', 'X'] },
+                constraints: { type: 'string', enum: ['O', 'X'] },
+              },
+              required: ['goal', 'scope', 'done', 'constraints'],
+            },
+            self_interview_rounds: { type: 'integer', minimum: 0, maximum: 0, description: 'Must be 0 — the operator interview replaces self-interview.' },
+            operator_clarification: { type: 'object', description: 'Required when initial_verdicts had any X, or when original_question is supplied and differs from question: the ouroboros interview session that clarified the question with the operator, and when the operator was asked and answered.', properties: { interview_session_id: {type:'string'}, asked_via: {type:'string'}, asked_at: {type:'string'}, answered_at: {type:'string'}, answer_summary: {type:'string'} }, required: ['interview_session_id','asked_via','asked_at','answered_at','answer_summary'] },
           },
-          required: ['verdicts', 'evidence'],
+          required: ['verdicts', 'evidence', 'initial_verdicts'],
         },
       },
       required: ['question'],
@@ -361,6 +398,26 @@ const TOOLS = [
       properties: { session_id: { type: 'string' } },
       required: ['session_id'],
     },
+  },
+  {
+    name: 'searchflow_await_operator',
+    description: 'Record that an interview question was sent to the operator and the lead is now waiting. Call this right after relaying each question, then end the turn. searchflow_pending lists these so the lead can resume after a restart.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        question: { type: 'string', description: 'The research question being clarified.' },
+        interview_session_id: { type: 'string' },
+        last_question: { type: 'string', description: 'The interview question just relayed to the operator.' },
+        asked_via: { type: 'string' },
+        asked_at: { type: 'string' },
+      },
+      required: ['question', 'interview_session_id', 'last_question', 'asked_via', 'asked_at'],
+    },
+  },
+  {
+    name: 'searchflow_pending',
+    description: 'List interviews waiting on the operator (last record is awaiting_operator) that were recorded under the same lead identity as this server process — when no identity is set, all leads on the machine share one list. Use it when an operator message arrives to find which interview and question it answers.',
+    inputSchema: { type: 'object', properties: {} },
   },
 ];
 
@@ -416,10 +473,10 @@ const GATE_RULES = [
   '④′ 제약 2종 분리 + 판정 순서(상호 참조 0): step 1 — 문면의 제약 후보에 역할 태그(배타 파티션 ❌·한 제약이 두 역할 겸행 가능): (a) 크기 제약(시한·형식·분량 — 독립 감점 ❌·③ 유계 판정의 입력으로만) / (b) 정답분기 제약(기준일·관할·대상 버전·안전 조건 등 — 답 «크기»는 안 바꾸나 «어느 답이 맞는지»를 바꾸는 파라미터). ④ 의 O/X = (b) 기준 단독: 과제 성격상 정답분기 파라미터가 필요한데 문면에 없으면 X — 면제 불가. 판별선 = 암묵 현재/불요(발주 시점 «지금» 상태 조사 — ④(b) 불요 = O) vs 명시 필요(기준시점·관할·버전이 정답을 가르는 과제 — 부재 = X). step 2 — ③ 유계 판정은 ① + ② + ④(a) «문면»만 입력(④ 판정 결과 참조 ❌).',
   '㉮ 지시대명사 세칙: 문면 안에서 선행 지시 대상이 해소되지 않는 지시대명사(「이거·그거·이들」) = ② X 고정 — 수신자가 발주자 머릿속 컨텍스트를 공유한다고 가정하지 않는다(추론 해소 ❌).',
   '내부 미지 구분: 조사로 밝힐 대상의 «내부 미지»(예: 어느 요금제가 있는지)는 게이트 트리거가 아니다 — 발주가 그 미지를 조사 과제로 지정했으면 O.',
-  '통과 = 4항목 전부 O(점수 = 명확도, 높을수록 명확). 하나라도 X = 셀프 인터뷰(질문 생성→자기 답변) 최대 3회로 질의를 다듬고 매 회 재채점. 3회 소진 후에도 미달 = 조사를 시작하지 말고 다듬어진 질문 + 미해소 항목을 들고 운영자에게 질문한다(대기 시간 상한 없음).',
+  '통과 = 4항목 전부 O(점수 = 명확도, 높을수록 명확). 하나라도 X = 조사 시작 ❌ — 지금 ouroboros_interview 를 시작해(initial_context = 원질문) 인터뷰가 낸 질문을 운영자에게 하나도 빠짐없이 그대로 전달한다(창구 사다리 SKILL.md §4 · 대기 시간 상한 없음 · 봇이 대신 답하지 않는다). 인터뷰가 완료되면 다듬은 질문을 다시 채점하고 gate.operator_clarification(interview_session_id 포함)을 함께 제출한다. 첫 채점 gate.initial_verdicts 는 언제나 함께 낸다.',
 ].join('\n');
 
-function gateCheck(gate) {
+function gateCheck(gate, question) {
   if (!gate || typeof gate !== 'object') {
     throw new Error(
       'P-1 모호도 게이트 미통과 — searchflow_start 는 gate 인자 없이 P0 로 진입하지 않는다.\n' +
@@ -437,22 +494,56 @@ function gateCheck(gate) {
       throw new Error(`gate.evidence.${k} 가 비어 있다 — 판정마다 근거 1줄이 필요하다(${GATE_ITEM_KO[k]})`);
   }
   const rounds = gate.self_interview_rounds ?? 0;
-  if (!Number.isInteger(rounds) || rounds < 0 || rounds > 3)
-    throw new Error(`gate.self_interview_rounds 위반: ${JSON.stringify(gate.self_interview_rounds)} — 0~3 정수만(셀프 인터뷰 상한 3회)`);
+  if (rounds !== 0)
+    throw new Error(`gate.self_interview_rounds 위반: ${JSON.stringify(gate.self_interview_rounds)} — 0 만 허용(셀프 인터뷰 폐기 · 운영자 인터뷰가 대신함)`);
   const failed = GATE_ITEMS.filter((k) => v[k] === 'X');
   if (failed.length) {
-    const tail = rounds >= 3
-      ? '셀프 인터뷰 3회를 이미 소진했다 — 조사를 시작하지 말고, 다듬어진 질문과 미해소 항목을 들고 운영자에게 질문하라(대기 시간 상한 없음).'
-      : `셀프 인터뷰(최대 3회 중 ${rounds}회 사용)로 질의를 다듬고 재채점 후 다시 호출하라.`;
     throw new Error(
-      `P-1 게이트 발동 — 미달 항목: ${failed.map((k) => GATE_ITEM_KO[k]).join(' · ')}.\n${tail}\n${GATE_RULES}`,
+      `P-1 게이트 발동 — 미달 항목: ${failed.map((k) => GATE_ITEM_KO[k]).join(' · ')}.\n조사 시작 ❌ — 지금 ouroboros_interview 를 시작해 그 질문을 운영자에게 전달하라(창구 사다리 SKILL.md §4 · 대기 시간 상한 없음). 봇이 대신 답하지 않는다.\n${GATE_RULES}`,
     );
   }
+  const iv0 = gate.initial_verdicts;
+  if (iv0 === undefined || iv0 === null)
+    throw new Error('gate.initial_verdicts 가 없다 — 운영자 인터뷰 전 첫 채점(O/X 4항목)을 함께 제출하라. 처음부터 명확했으면 verdicts 와 같은 값.');
+  {
+    if (typeof iv0 !== 'object') throw new Error('gate.initial_verdicts 형식 위반: 객체여야 한다');
+    for (const k of GATE_ITEMS) {
+      if (iv0[k] !== 'O' && iv0[k] !== 'X')
+        throw new Error(`gate.initial_verdicts.${k} 값 위반: ${JSON.stringify(iv0[k])} — 'O' 또는 'X' 만 허용(${GATE_ITEM_KO[k]})`);
+    }
+  }
+  const oq = typeof gate.original_question === 'string' ? gate.original_question.trim() : '';
+  const needOC = !!(iv0 && GATE_ITEMS.some((k) => iv0[k] === 'X')) || (!!oq && oq !== String(question).trim());
+  const oc = gate.operator_clarification;
+  const OC_KEYS = ['interview_session_id', 'asked_via', 'asked_at', 'answered_at', 'answer_summary'];
+  let ocOut, interview;
+  if (oc !== undefined && oc !== null) {
+    if (typeof oc !== 'object' || !OC_KEYS.every((k) => typeof oc[k] === 'string' && oc[k].trim()))
+      throw new Error(`gate.operator_clarification 형식 위반: ${OC_KEYS.join('·')} 5칸이 모두 필요하다`);
+    ocOut = Object.fromEntries(OC_KEYS.map((k) => [k, oc[k].trim()]));
+    const iv = readInterview(ocOut.interview_session_id);
+    if (iv.status !== 'completed')
+      throw new Error(`인터뷰가 끝나지 않았다(status=${iv.status}) — 운영자 답을 더 받아 인터뷰를 완료하라`);
+    if (typeof iv.ambiguity_score !== 'number' || iv.ambiguity_score > 0.2)
+      throw new Error(`인터뷰 모호도 ${iv.ambiguity_score} > 0.2 — 아직 조사할 만큼 명확하지 않다`);
+    const answered = (Array.isArray(iv.rounds) ? iv.rounds : [])
+      .filter((r) => r && typeof r.user_response === 'string' && r.user_response.trim()).length;
+    if (answered < 1) throw new Error('인터뷰에 운영자 답이 없다');
+    const oq0 = (oq || String(question).trim());
+    if (!String(iv.initial_context).includes(oq0))
+      throw new Error('인터뷰 initial_context 에 원질문이 없다 — 다른 질문의 인터뷰는 쓸 수 없다');
+    interview = { ambiguity_score: iv.ambiguity_score, answered_rounds: answered, status: iv.status };
+  }
+  if (needOC && !ocOut)
+    throw new Error('P-1 게이트: 운영자 인터뷰 근거가 필요하다 — gate.operator_clarification{interview_session_id, asked_via, asked_at, answered_at, answer_summary} 를 함께 제출하라. 봇이 혼자 다듬은 질문은 받지 않는다.');
   return {
     verdicts: { ...v },
     evidence: Object.fromEntries(GATE_ITEMS.map((k) => [k, String(ev[k]).trim()])),
+    initial_verdicts: iv0 ? Object.fromEntries(GATE_ITEMS.map((k) => [k, iv0[k]])) : undefined,
     original_question: gate.original_question ? String(gate.original_question) : undefined,
     self_interview_rounds: rounds,
+    operator_clarification: ocOut,
+    interview,
   };
 }
 
@@ -460,7 +551,7 @@ function toolStart(args) {
   const q = String(args.question || '').trim();
   if (!q) throw new Error('question 이 비어 있다');
   // P-1 가드 — 통과 못 하면 여기서 끝난다(P0 진입 거부). 기록은 start 이벤트 직후 원장에.
-  const clearance = gateCheck(args.gate);
+  const clearance = gateCheck(args.gate, q);
   // 유형 고정. 미지정이면 기존 라우팅 그대로다 — 무인자·무env 거동은 한 글자도 바뀌지 않는다.
   // env 가 인자를 이긴다: 인자는 호출하는 쪽이 넣어 줘야 하니 지시에 불과하고, env 는 프로세스를
   // 띄우는 쪽이 쥔다. 지켜야만 작동하는 것은 기제가 아니다.
@@ -484,12 +575,22 @@ function toolStart(args) {
     const fid = `f${i + 1}`;
     return { frame_id: fid, focus: label, worker_brief: workerBrief(q, fid, label, deadline) };
   });
+  const ds = args.deadline_source ?? 'default';
+  if (ds !== 'operator' && ds !== 'default')
+    throw new Error(`deadline_source 값 위반: ${JSON.stringify(args.deadline_source)} — operator|default 만`);
   const id = sessionId(q, args.salt || '');
   // truncate 하지 않는다 — id 가 미사용임을 sessionId 가 보장하고, appendFileSync 가 파일을 만든다.
-  ledgerAppend(id, { event: 'start', schema_version: '1', session_id: id, question: q, type, type_source: typeSource, router_type: routed, frames });
+  ledgerAppend(id, { event: 'start', schema_version: '1', session_id: id, question: q, type, type_source: typeSource, router_type: routed, deadline_source: ds, frames });
   // P-1 clearance 를 원장에 남긴다(시드 문서 표준 — 원질문·항목별 판정·근거·셀프 인터뷰 회차).
   // start 뒤에 적는 이유: 원장 소비자 계약이 「첫 이벤트 = start」다(selfTest 13). 인과는 이벤트 의미가 담는다.
   ledgerAppend(id, { event: 'p1_gate', schema_version: '1', session_id: id, question: q, ...clearance });
+  // 운영자 인터뷰가 통과 근거로 쓰였으면 대기 목록에서 뺀다(그 id 의 대기 기록이 있을 때만).
+  const ivId = clearance.operator_clarification?.interview_session_id;
+  if (ivId) {
+    const pf = join(stateDir(), '_pending', `${ivId}.jsonl`);   // pendingDir() 은 폴더를 만든다 — 기록이 있을 때만 쓰려고 만들지 않고 경로만 본다
+    if (existsSync(pf))
+      appendFileSync(pf, JSON.stringify({ event: 'resolved', schema_version: '1', interview_session_id: ivId, session_id: id, bot: process.env.DISCORD_STATE_DIR ?? '', at: new Date().toISOString() }) + '\n', 'utf8');
+  }
   return recordOutbound(id, 'searchflow_start', {
     session_id: id,
     research_type: type,
@@ -645,7 +746,41 @@ function toolGate(args) {
   return emitGate(session_id, { event: 'gate', rule, decision: 'reinvestigate', frame_id: target.fid, rounds: rounds + 1 }, out);
 }
 
-const DISPATCH = { searchflow_start: toolStart, searchflow_submit: toolSubmit, searchflow_gate: toolGate };
+function toolAwaitOperator(args) {
+  const F = ['question', 'interview_session_id', 'last_question', 'asked_via', 'asked_at'];
+  for (const k of F) {
+    if (typeof args[k] !== 'string' || !args[k].trim()) throw new Error(`${k} 가 비어 있다 — ${F.join('·')} 5칸이 모두 필요하다`);
+  }
+  const id = args.interview_session_id.trim();
+  if (!INTERVIEW_ID_RE.test(id)) throw new Error(`interview_session_id 형식 위반: ${JSON.stringify(id)}`);
+  appendFileSync(join(pendingDir(), `${id}.jsonl`), JSON.stringify({
+    event: 'awaiting_operator', schema_version: '1', interview_session_id: id,
+    question: args.question.trim(), last_question: args.last_question.trim(),
+    asked_via: args.asked_via.trim(), asked_at: args.asked_at.trim(),
+    bot: process.env.DISCORD_STATE_DIR ?? '', at: new Date().toISOString(),
+  }) + '\n', 'utf8');
+  return { ok: true, interview_session_id: id,
+    instructions: '질문을 운영자에게 보냈으면 이 턴을 끝내라. 답이 오면 searchflow_pending 으로 이 세션을 찾아 ouroboros_interview 에 답을 넣고 이어 간다.' };
+}
+
+function toolPending() {
+  const dir = pendingDir();
+  const me = process.env.DISCORD_STATE_DIR ?? '';
+  const pending = [];
+  for (const f of readdirSync(dir)) {
+    if (!f.endsWith('.jsonl')) continue;
+    let last = null;
+    for (const l of readFileSync(join(dir, f), 'utf8').split('\n').filter(Boolean)) {
+      try { last = JSON.parse(l); } catch { /* 파싱 실패 줄은 건너뜀 */ }
+    }
+    if (last && last.event === 'awaiting_operator' && last.bot === me)
+      pending.push({ interview_session_id: last.interview_session_id, question: last.question, last_question: last.last_question, asked_via: last.asked_via, asked_at: last.asked_at });
+  }
+  pending.sort((a, b) => (a.asked_at < b.asked_at ? -1 : a.asked_at > b.asked_at ? 1 : 0));
+  return { pending };
+}
+
+const DISPATCH = { searchflow_start: toolStart, searchflow_submit: toolSubmit, searchflow_gate: toolGate, searchflow_await_operator: toolAwaitOperator, searchflow_pending: toolPending };
 
 // ── JSON-RPC ──────────────────────────────────────────────────────────────
 function handle(msg) {
@@ -694,11 +829,21 @@ function serve() {
 
 // ── 자체 테스트 ───────────────────────────────────────────────────────────
 function selfTest() {
+  // 인터뷰 상태 폴더는 시험 동안만 임시 폴더로 바꾼다(끝에서 되돌림) — 실제 ~/.ouroboros/data 는 건드리지 않는다.
+  const REAL_INTERVIEW_DIR = INTERVIEW_DATA_DIR;
+  INTERVIEW_DATA_DIR = mkdtempSync(join(tmpdir(), 'sf-iv-'));
+  const mkIv = (id, { status = 'completed', score = 0.1, answers = 2, ctx = '' } = {}) => {
+    const rounds = Array.from({ length: answers }, (_, i) => ({ round_number: i + 1, question: 'q', user_response: 'a', provenance: 'user' }));
+    rounds.push({ round_number: answers + 1, question: 'q', user_response: '', provenance: 'user' });
+    writeFileSync(join(INTERVIEW_DATA_DIR, `interview_${id}.json`),
+      JSON.stringify({ status, ambiguity_score: score, initial_context: ctx, rounds, requirement_distillation: null }), 'utf8');
+  };
   const results = [];
   const ok = (name, cond, detail = '') => results.push({ name, ok: !!cond, detail });
   // P-1 통과 clearance 표본 — selfTest 의 start 는 전부 이걸 달고 들어간다(게이트 자체 검증은 17~20).
   const G_OK = {
     verdicts: { goal: 'O', scope: 'O', done: 'O', constraints: 'O' },
+    initial_verdicts: { goal: 'O', scope: 'O', done: 'O', constraints: 'O' },
     evidence: { goal: '목표 동사 명시', scope: '범위 한정어 실재', done: '유계성 충족', constraints: '시한 명시' },
     self_interview_rounds: 0,
   };
@@ -711,9 +856,9 @@ function selfTest() {
   // 2 통지는 응답 없음
   ok('notifications/initialized = 응답 없음', handle({ jsonrpc: '2.0', method: 'notifications/initialized' }) === null);
 
-  // 3 도구 3종 노출 + 스키마 필수 필드
+  // 3 도구 5종 노출 + 스키마 필수 필드
   const list = handle({ jsonrpc: '2.0', id: 2, method: 'tools/list' }).result.tools;
-  ok('tools/list 3종', list.length === 3 && list.every((t) => t.name && t.description && t.inputSchema), `${list.length}종`);
+  ok('tools/list 5종', list.length === 5 && list.every((t) => t.name && t.description && t.inputSchema), `${list.length}종`);
 
   // 4 유형 라우팅
   ok('유형 라우팅', routeType('이 주장이 사실인가') === 'factcheck' && routeType('A와 B 비교') === 'compare');
@@ -936,10 +1081,10 @@ function selfTest() {
   try {
     toolStart({ question: '범위 없는 질의', salt: 't',
       gate: { verdicts: { goal: 'O', scope: 'X', done: 'X', constraints: 'O' },
-              evidence: { goal: 'a', scope: 'b', done: 'c', constraints: 'd' }, self_interview_rounds: 1 } });
+              evidence: { goal: 'a', scope: 'b', done: 'c', constraints: 'd' }, self_interview_rounds: 0 } });
   } catch (e) { xMsg = e.message; }
-  ok('P-1: 일부 X = 발동 + 미달 항목 지목 + 셀프 인터뷰 지시',
-     xMsg.includes('발동') && xMsg.includes('② 대상 범위') && xMsg.includes('③ 완료 판정') && xMsg.includes('셀프 인터뷰'),
+  ok('P-1: 일부 X = 발동 + 미달 항목 지목 + 인터뷰 시작 지시(셀프 인터뷰 해소 ❌)',
+     xMsg.includes('발동') && xMsg.includes('② 대상 범위') && xMsg.includes('③ 완료 판정') && xMsg.includes('ouroboros_interview') && !xMsg.includes('다시 호출'),
      xMsg.slice(0, 60));
 
   // 18b 3회 소진 후 미달 = 조사 시작 불가·운영자 질문 지시 (A7·A11)
@@ -947,10 +1092,10 @@ function selfTest() {
   try {
     toolStart({ question: '소진 세션', salt: 't',
       gate: { verdicts: { goal: 'O', scope: 'X', done: 'O', constraints: 'O' },
-              evidence: { goal: 'a', scope: 'b', done: 'c', constraints: 'd' }, self_interview_rounds: 3 } });
+              evidence: { goal: 'a', scope: 'b', done: 'c', constraints: 'd' }, self_interview_rounds: 0 } });
   } catch (e) { spentMsg = e.message; }
-  ok('P-1: 3회 소진 + 미달 = 운영자 질문 지시(재시도 지시 ❌)',
-     spentMsg.includes('운영자에게 질문') && !spentMsg.includes('다시 호출'), spentMsg.slice(0, 60));
+  ok('P-1: 회차 0 이어도 X = 인터뷰 시작 지시(재시도 지시 ❌)',
+     spentMsg.includes('ouroboros_interview') && !spentMsg.includes('다시 호출'), spentMsg.slice(0, 60));
 
   // 19 형식 위반(음성) — 소문자 verdicts / 빈 evidence / rounds 4 = 각각 거부
   const malformed = [
@@ -969,8 +1114,115 @@ function selfTest() {
   const p1 = gLed.filter((e) => e.event === 'p1_gate');
   ok('P-1: 통과 = 원장 p1_gate 1건(verdicts 4·evidence 4·rounds 보존) · 첫 이벤트는 start 유지',
      p1.length === 1 && GATE_ITEMS.every((k) => p1[0].verdicts[k] === 'O' && p1[0].evidence[k]) &&
-     p1[0].self_interview_rounds === 0 && gLed[0].event === 'start',
+     p1[0].self_interview_rounds === 0 && gLed[0].event === 'start' && gLed[0].deadline_source === 'default',
      `p1_gate=${p1.length}`);
+
+  const G4 = { verdicts: { goal: 'O', scope: 'O', done: 'O', constraints: 'O' }, initial_verdicts: { goal: 'O', scope: 'O', done: 'O', constraints: 'O' }, evidence: { goal: 'a', scope: 'b', done: 'c', constraints: 'd' } };
+  // 21 다듬은 질문 + operator_clarification 부재 = 거부
+  let m21 = '';
+  try { toolStart({ question: '다듬은 질문 A', salt: 't21', gate: { ...G4, original_question: '이거 알아봐 줘' } }); }
+  catch (e) { m21 = e.message; }
+  ok('P-1: 다듬은 질문 + operator_clarification 부재 = 거부(운영자 인터뷰 근거)', m21.includes('운영자 인터뷰 근거'), m21.slice(0, 60));
+
+  // 22 rounds 1 = 거부(셀프 인터뷰 폐기)
+  let m22 = '';
+  try { toolStart({ question: '회차 초과', salt: 't22', gate: { ...G4, self_interview_rounds: 1 } }); }
+  catch (e) { m22 = e.message; }
+  ok('P-1: self_interview_rounds 1 = 거부(0 만 허용)', m22.includes('0 만 허용'), m22.slice(0, 60));
+
+  // 23 initial_verdicts X + 다듬은 질문 + operator_clarification 5칸(실제 인터뷰 상태 파일 검증) = 통과·원장 보존
+  const IV_A = 'interview_0123456789abcdef';
+  mkIv(IV_A, { status: 'completed', score: 0.17, answers: 2, ctx: '원질문: 이거 알아봐 줘 · 조사 질문' });
+  const oc23 = { interview_session_id: IV_A, asked_via: 'operator-dm', asked_at: '10:00', answered_at: '10:05', answer_summary: '범위 확정' };
+  const IV_X = { goal: 'O', scope: 'X', done: 'O', constraints: 'O' };
+  const G23 = { ...G4, initial_verdicts: IV_X, original_question: '이거 알아봐 줘', operator_clarification: oc23 };
+  let s23 = null;
+  try { s23 = toolStart({ question: '다듬은 질문 B', salt: 't23', deadline_source: 'operator', gate: G23 }); }
+  catch (e) { s23 = null; }
+  const l23 = s23 ? ledgerRead(s23.session_id) : [];
+  const p23 = l23.find((e) => e.event === 'p1_gate');
+  ok('P-1: 인터뷰 근거 동반 = 통과 · 원장 operator_clarification 5칸·interview·initial_verdicts 보존 · deadline_source operator',
+     !!s23 && p23 && ['interview_session_id', 'asked_via', 'asked_at', 'answered_at', 'answer_summary'].every((k) => p23.operator_clarification?.[k] === oc23[k]) &&
+     p23.interview?.ambiguity_score === 0.17 && p23.interview?.answered_rounds === 2 && p23.initial_verdicts?.scope === 'X' &&
+     l23[0].deadline_source === 'operator', s23 ? '' : 'rejected');
+
+  // 24 deadline_source 'later' = 거부
+  let r24 = false;
+  try { toolStart({ question: '시한 출처 위반', salt: 't24', deadline_source: 'later', gate: G4 }); }
+  catch (e) { r24 = e.message.includes('deadline_source'); }
+  ok('start: deadline_source 허용값 밖 = 거부', r24);
+
+  // 새 시험 공통: 거부 메시지 수집
+  const rej = (args) => { try { toolStart(args); return ''; } catch (e) { return e.message; } };
+
+  // 25 initial_verdicts X + original_question 없음 + oc 없음 = 거부
+  const m25 = rej({ question: '초기 X 질문', salt: 't25', gate: { ...G4, initial_verdicts: IV_X } });
+  ok('P-1: initial_verdicts X + 근거 없음 = 거부(운영자 인터뷰 근거)', m25.includes('운영자 인터뷰 근거'), m25.slice(0, 60));
+
+  // 25b initial_verdicts 생략(4항목 O 만) = 거부 — 첫 채점을 빼서 인터뷰 근거 강제를 피하는 길 차단
+  const { initial_verdicts: _drop, ...G4noIV } = G4;
+  const m25b = rej({ question: '첫 채점 생략', salt: 't25b', gate: G4noIV });
+  ok('P-1: initial_verdicts 생략 = 거부(첫 채점 필수)', m25b.includes('initial_verdicts 가 없다'), m25b.slice(0, 60));
+
+  // 26 상태 파일 없는 id = 거부
+  const m26 = rej({ question: '다듬은 질문 C', salt: 't26', gate: { ...G23, operator_clarification: { ...oc23, interview_session_id: 'interview_fedcba9876543210' } } });
+  ok('P-1: 인터뷰 상태 파일 없음 = 거부', m26.includes('상태 파일 없음'), m26.slice(0, 60));
+
+  // 27 in_progress = 거부
+  const IV_B = 'interview_1111111111111111';
+  mkIv(IV_B, { status: 'in_progress', score: 0.1, answers: 2, ctx: '이거 알아봐 줘' });
+  const m27 = rej({ question: '다듬은 질문 D', salt: 't27', gate: { ...G23, operator_clarification: { ...oc23, interview_session_id: IV_B } } });
+  ok('P-1: 인터뷰 in_progress = 거부(끝나지 않았다)', m27.includes('끝나지 않았다'), m27.slice(0, 60));
+
+  // 28 모호도 0.25 = 거부
+  const IV_C = 'interview_2222222222222222';
+  mkIv(IV_C, { status: 'completed', score: 0.25, answers: 2, ctx: '이거 알아봐 줘' });
+  const m28 = rej({ question: '다듬은 질문 E', salt: 't28', gate: { ...G23, operator_clarification: { ...oc23, interview_session_id: IV_C } } });
+  ok('P-1: 인터뷰 모호도 0.25 = 거부(0.2 초과)', m28.includes('0.2'), m28.slice(0, 60));
+
+  // 29 initial_context 에 원질문 없음 = 거부
+  const IV_D = 'interview_3333333333333333';
+  mkIv(IV_D, { status: 'completed', score: 0.1, answers: 2, ctx: '전혀 다른 질문' });
+  const m29 = rej({ question: '다듬은 질문 F', salt: 't29', gate: { ...G23, operator_clarification: { ...oc23, interview_session_id: IV_D } } });
+  ok('P-1: 인터뷰 initial_context 에 원질문 없음 = 거부', m29.includes('initial_context'), m29.slice(0, 60));
+
+  // 30 경로 탈출 id = 거부
+  const m30 = rej({ question: '다듬은 질문 G', salt: 't30', gate: { ...G23, operator_clarification: { ...oc23, interview_session_id: '../../etc/x' } } });
+  ok('P-1: interview_session_id 경로 탈출 = 거부(형식 위반)', m30.includes('형식 위반'), m30.slice(0, 60));
+
+  // 31 운영자 답 0 회차 = 거부
+  const IV_E = 'interview_4444444444444444';
+  mkIv(IV_E, { status: 'completed', score: 0.1, answers: 0, ctx: '이거 알아봐 줘' });
+  const m31 = rej({ question: '다듬은 질문 H', salt: 't31', gate: { ...G23, operator_clarification: { ...oc23, interview_session_id: IV_E } } });
+  ok('P-1: 운영자 답 0 회차 = 거부', m31.includes('운영자 답이 없다'), m31.slice(0, 60));
+
+  // 32 재개 장치 — 대기 기록·bot 필터·날짜 꼴 id·start 통과 시 resolved. 실제 ~/.searchflow 를 더럽히지 않게 상태 폴더도 임시로.
+  const saveState = process.env.SEARCHFLOW_STATE_DIR, saveBot = process.env.DISCORD_STATE_DIR;
+  let r32 = false, d32 = '';
+  try {
+    process.env.SEARCHFLOW_STATE_DIR = mkdtempSync(join(tmpdir(), 'sf-st-'));
+    const IV_DATE = 'interview_20000101_000000';
+    const aw = (id, bot) => { process.env.DISCORD_STATE_DIR = bot; return toolAwaitOperator({ question: '이거 알아봐 줘', interview_session_id: id, last_question: '범위는?', asked_via: 'operator-dm', asked_at: '2026-10-13T10:00:00Z' }); };
+    aw('interview_aaaaaaaaaaaaaaaa', 'bot-a');
+    aw('interview_bbbbbbbbbbbbbbbb', 'bot-b');
+    const awDate = aw(IV_DATE, 'bot-a');
+    process.env.DISCORD_STATE_DIR = 'bot-a';
+    const p1x = toolPending().pending.map((p) => p.interview_session_id).sort();
+    mkIv('interview_aaaaaaaaaaaaaaaa', { status: 'completed', score: 0.1, answers: 2, ctx: '이거 알아봐 줘' });
+    const s32 = toolStart({ question: '다듬은 질문 I', salt: 't32', deadline_source: 'operator',
+      gate: { ...G23, operator_clarification: { ...oc23, interview_session_id: 'interview_aaaaaaaaaaaaaaaa' } } });
+    const p2x = toolPending().pending.map((p) => p.interview_session_id);
+    r32 = awDate.ok === true && p1x.length === 2 && p1x.includes('interview_aaaaaaaaaaaaaaaa') && p1x.includes(IV_DATE) &&
+          !p1x.includes('interview_bbbbbbbbbbbbbbbb') && !!s32 && !p2x.includes('interview_aaaaaaaaaaaaaaaa') && p2x.includes(IV_DATE);
+    d32 = `before=${JSON.stringify(p1x)} after=${JSON.stringify(p2x)}`;
+  } catch (e) { d32 = e.message; }
+  finally {
+    if (saveState === undefined) delete process.env.SEARCHFLOW_STATE_DIR; else process.env.SEARCHFLOW_STATE_DIR = saveState;
+    if (saveBot === undefined) delete process.env.DISCORD_STATE_DIR; else process.env.DISCORD_STATE_DIR = saveBot;
+  }
+  ok('재개: await_operator 기록 · pending bot 필터 · 날짜 꼴 id · start 통과 시 목록에서 빠짐', r32, d32);
+
+  INTERVIEW_DATA_DIR = REAL_INTERVIEW_DIR;
 
   let failed = 0;
   for (const r of results) {

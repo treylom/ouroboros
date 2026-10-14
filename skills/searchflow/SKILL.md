@@ -1,6 +1,6 @@
 ---
 name: searchflow
-description: Use when a research question needs sourced, cross-checked findings — fact-checks, market/company/tech/policy research, comparisons, or open exploration. Gates ambiguous questions first (P-1 — four clarity items, self-interview refinement before any searching), routes the question to a research type, spawns per-frame investigators, grades sources, and re-investigates the weakest axis until a deadline or round cap. Replaces /deep-research.
+description: Use when a research question needs sourced, cross-checked findings — fact-checks, market/company/tech/policy research, comparisons, or open exploration. Gates ambiguous questions first (P-1 — four clarity items; if any fails, clarifies it with the operator through the Ouroboros interview before any searching), routes the question to a research type, spawns per-frame investigators, grades sources, and re-investigates the weakest axis until a deadline or round cap. Replaces /deep-research.
 ---
 
 # SearchFlow
@@ -57,18 +57,25 @@ description: Use when a research question needs sourced, cross-checked findings 
 
 **발동 (하나라도 X)**:
 
-- `auto`(기본): **셀프 인터뷰** — 인터뷰 구조(질문 생성 → 답변)를 자기 문답으로 최대 **3회**. 매 회 후 재채점, 전부 O 도달 = 다듬어진 질문으로 P0 진입.
-- `manual`: 운영자 인터뷰.
-- 3회 소진 후에도 미달 = **조사 시작 ❌** — 다듬어진 질문 + 미해소 항목을 들고 운영자에게 질문한다. 대기 시간 상한 없음.
+4항목 채점은 인터뷰를 열지 정하는 가벼운 1차 판정이다. 전부 O 면 바로 P0, 하나라도 X 면 **우로보로스 인터뷰**로 운영자와 질문을 좁힌다 — 봇이 혼자 다듬지 않는다.
 
-**기록**: 시드 문서 표준 — 원질문 → 다듬어진 질문 · 항목별 판정(O/X + 근거) · 결정 이력. server-owned 면 세션 원장의 `p1_gate` 이벤트가 이 기록이다(내부 로그에 회차별 이력).
+1. **조사 시작 ❌.** `ouroboros_interview` 를 시작한다 — `initial_context` = 원질문 그대로 + 「이건 조사 질문이다 — 목표·범위·끝 기준·기준일을 좁혀라」.
+2. **인터뷰가 낸 질문은 하나도 빠짐없이 운영자에게 그대로 전달한다**(창구 = §4 「운영자 질문 창구」 사다리). 봇이 코드·조사로 대신 답하는 경로는 쓰지 않는다. 보낸 직후 `searchflow_await_operator` 로 기다림을 기록하고 턴을 끝낸다. 대기 시간 상한 없음.
+3. **답이 오면** `searchflow_pending` 으로 어느 인터뷰·어느 질문의 답인지 찾아 `ouroboros_interview`(session_id · answer · last_question)에 넣는다 → 다음 질문 → 2 반복.
+4. **인터뷰 완료**(모호도 ≤ 0.2 + 항목 하한 + 연속 2회 — 인터뷰 도구가 판정)면 **종료 감사**: 다듬어진 질문을 4항목으로 다시 채점한다. 전부 O 가 아니면 인터뷰로 돌아간다. 다듬어진 질문은 인터뷰 기록(질문·답)에서 가져온다 — 봇이 새로 의역하지 않는다.
+5. **P0 마감 시한 질문은 인터뷰 질문과 같은 메시지에 따로 한 줄로 덧붙인다** — 인터뷰 질문 문구는 손대지 않는다 · 이미 답을 받았으면 다시 묻지 않는다(따로 왕복하지 않는다).
 
-**server-owned 강제**: `searchflow_start` 는 `gate` 인자(4항목 verdicts + evidence + 셀프 인터뷰 회차) 없이는 **P0 로 넘어가지 않는다** — SKILL 서사를 건너뛴 MCP 도구 직행도 같은 게이트를 밟는다. skill-owned 면 본 절 자체가 게이트다: P0 의 어떤 단계도 이 채점 전에 시작하지 않는다.
+- 최소 비용 = 운영자 답 2회(인터뷰 도구 기준 — 연속 2회 통과해야 끝나고, 답 없는 회차는 통과 불가 · 서버는 답 1회 이상만 확인). 명확한 질문은 1에 들어가지 않으므로 0회.
+- **인터뷰 도구 실패**: 재개 최대 2회 → 그래도 실패 = 조사 ❌ + 운영자에게 「인터뷰 도구 실패 — 질문을 좁혀 다시 주시면 진행합니다」 1줄. 셀프 인터뷰로 대신하지 않는다.
+
+**기록**: 시드 문서 표준 — 원질문 → 다듬어진 질문 · 첫 채점(`initial_verdicts`)과 마지막 채점 · 운영자 인터뷰(`operator_clarification` · 인터뷰 모호도 · 답한 회차 수) · 결정 이력. server-owned 면 세션 원장의 `p1_gate` 이벤트가 이 기록이다 — 운영자에게 물었는지·언제·몇 회차 답했는지를 원장에서 볼 수 있다.
+
+**server-owned 강제**: `searchflow_start` 는 `gate` 인자(4항목 verdicts + evidence) 없이는 **P0 로 넘어가지 않는다**. 첫 채점(`initial_verdicts`)에 X 가 있었거나, 원질문(`original_question`)이 함께 들어왔고 질문과 다르면 `gate.operator_clarification`(interview_session_id · asked_via · asked_at · answered_at · answer_summary)이 필요하고, 서버가 그 인터뷰의 상태 파일을 직접 읽어 확인한다: 완료 상태 · 모호도 ≤ 0.2 · 비어 있지 않은 답이 있는 회차 1개 이상 · 인터뷰 시작 문맥에 원질문이 들어 있음. 하나라도 아니면 거부한다. 한계: 첫 채점과 원질문은 호출자가 신고하는 값이고, 인터뷰 기록의 «누가 답했나»도 호출자가 붙인다 — 서버는 «사람이 답했다»를 증명하지 못한다. 첫 채점(`initial_verdicts`)은 언제나 필수이고(빠지면 거부 — 처음부터 명확했으면 verdicts 와 같은 값), 질문을 다듬었으면 원질문도 반드시 함께 보낸다. `self_interview_rounds` 는 0 만 받는다. SKILL 서사를 건너뛴 MCP 도구 직행도 같은 게이트를 밟는다. skill-owned 면 본 절 자체가 게이트다: P0 의 어떤 단계도 이 채점 전에 시작하지 않는다.
 
 ## 1. 공정 (P-1 → P0 → P4)
 
 ```
-P-1 게이트  ── 질의 4항목 채점(전부 O = 진입) → 미달 = 셀프 인터뷰 ≤3회 → 그래도 미달 = 조사 ❌(운영자 질문)
+P-1 게이트  ── 질의 4항목 채점(전부 O = 진입) → 미달 = 조사 ❌ · 우로보로스 인터뷰 질문을 운영자에게 전달(§4) → 인터뷰 완료 → 재채점
 P0 스코핑 ── 유형 판정 → 프레임 확정 → 깊이 라우팅 → 묶음 질문 1회(마감 시한 포함) → 권한 preflight
 P1 스폰   ── 프레임 축마다 조사 단위 1개 (하네스별 분기 §3)
 P2 수집   ── 워커: 근거 + SELF-REPORT(Y/N + 근거 1줄)만 반환. 등급 부여 ❌
@@ -258,7 +265,15 @@ node scripts/spawn-plan.mjs --test   # 경로 등가·순차 분리 유지·상�
 
 묶음 질문에 **반드시 포함**: 마감 시한(1차 종료 조건).
 
-채널: CC = 대화형 질문 도구 / Codex = 리드가 사용자에게 묻고 답을 워커에 주입.
+채널 = 아래 「운영자 질문 창구」 사다리. P-1 질문과 P0 묶음 질문이 같은 사다리를 쓴다 — «질문 못 함 → 바로 기본값»으로 건너뛰지 않는다.
+
+### 운영자 질문 창구 (사다리)
+
+1. **운영자가 같은 대화 화면에 있으면** = 대화형 질문 도구(Codex = 리드가 사용자에게 직접 묻고 답을 워커에 주입).
+2. **아니면 = 하네스 규칙이 정한 운영자 메시지 창구**(DM 등)로 질문을 보낸다 → `searchflow_await_operator` 로 기록 → 그 턴을 끝낸다 → 답이 도착하면 `searchflow_pending` 으로 이어 갈 인터뷰를 찾아 재개한다(압축·재시작 뒤에도). 대기 시간 상한 없음. 창구는 하네스가 정한다 — 질문이 나가고 답이 들어오는 목적지라, 프로젝트 폴더의 설정 파일이 바꿀 수 있는 값(환경변수 등)으로 받지 않는다. 답은 그 창구에서 운영자가 보낸 것만 쓴다.
+3. **1·2 모두 없을 때** = P-1 미달 질문은 **조사 ❌ 유지**(기본값으로 넘어갈 수 없다). P0 마감 시한만 기본값(§ 비대화 실행)을 쓰고, 이때 보고서 `deadline=default` 표기는 **필수**.
+
+`searchflow_start` 의 `deadline_source` = 시한을 운영자에게 받았으면 `operator`, 기본값이면 `default`(생략하면 default) — 원장 `start` 이벤트에 남는다.
 
 ### 스폰 후 새 질문 (blocked node)
 
@@ -283,7 +298,7 @@ node scripts/relay-check.mjs --test   # 양성 + 음성 5종 + exit 계약
 
 ### 비대화 실행 (질문 채널 없음)
 
-`codex exec` 류로 질문할 수 없으면 **기본값을 채택**한다: 시한 = 시작 + 30분 · 라운드 상한 4. 보고서 「환경·한계」에 `deadline=default` 라벨.
+창구 사다리 1·2 가 모두 없을 때만(예: 운영자 메시지 창구도 지정되지 않은 `codex exec`) **기본값을 채택**한다: 시한 = 시작 + 30분 · 라운드 상한 4. 보고서 「환경·한계」에 `deadline=default` 라벨 **필수**. P-1 미달 질문은 이 경로로도 조사를 시작하지 않는다.
 
 ## 5. preflight (시작 시 1회)
 
@@ -365,6 +380,8 @@ preflight 의 `labels` 를 spawn-plan labels 뒤에 콤마로 잇는다 — 두 
 > 이 검사기는 **칸이 있고 비어있지 않은가**만 본다. 내용의 진위·인용 일치·점수 계산은 보지 않는다 — GREEN 을 "보고서가 옳다"로 인용하지 말 것.
 - `out/sources.jsonl` — schema v1 (리드 single-writer, `grade-ledger.mjs` 통과)
 - `out/relay.jsonl` — 사용자 질문 릴레이 원장 (리드 single-writer, `relay-check.mjs` 통과). 질문이 0건이었으면 이 파일은 만들지 않는다 — **빈 파일을 남기지 않는다**(검사기가 빈 원장을 위반으로 잡는다).
+
+**운영자에게 답할 때** 첫머리 또는 끝에 1줄: `검색 라운드 <n> · 재조사 <n>회 · 판정 <done|done_with_gaps|…>` — 보고서 「환경·한계」의 `operator_questions=<n>` · `deadline_source=…` 와 함께, 운영자에게 몇 번 물었고 시한이 어디서 왔는지 보이게 한다.
 
 ## 9. 공개 안전
 
