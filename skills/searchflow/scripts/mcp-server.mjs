@@ -548,13 +548,15 @@ function gateCheck(gate, question) {
     // 원질문 확인 = 첫 줄 정확 일치. 원질문은 JSON 문자열로 적는다 — 따옴표·줄바꿈이 이스케이프되어 첫 줄이
     // 원질문 하나로 끝나므로, 원질문 안의 닫는 따옴표+줄바꿈이 형식의 경계로 읽히지 않는다(부분 일치·날 따옴표
     // 머리는 지시문 조각·짧은 앞부분으로 다른 질문의 인터뷰를 통과시켰다).
-    // 둘째 줄부터(빈 줄 건너뜀)는 검색 인터뷰 지시문으로 시작해야 한다 — 원질문 칸 안의 표지 글자는 세지 않는다.
+    // 둘째 줄부터는 검색 인터뷰 지시문 «전문»과 같아야 한다(공백·줄바꿈 차이만 무시). 표지로 «시작»만 보면, 날 따옴표로
+    // 적은 긴 원질문의 뒷부분이 표지 글자로 이어질 때 짧은 다른 원질문의 인터뷰로 통과했다(3차 보안 F·G·H / T3).
     const oq0 = (oq || String(question).trim());
     const lines = String(iv.initial_context).replace(/^\s+/, '').split(/\r?\n/);
     if (lines[0].replace(/\s+$/, '') !== `원질문: ${JSON.stringify(oq0)}`)
       throw new Error('인터뷰 initial_context 첫 줄이 이 원질문이 아니다 — 첫 줄은 «원질문: <원질문의 JSON 문자열>» 이어야 한다. 다른 질문의 인터뷰는 쓸 수 없다');
-    if (!lines.slice(1).join('\n').trimStart().startsWith(INTERVIEW_FRAME_MARK))
-      throw new Error(`인터뷰 initial_context 둘째 줄부터가 ${INTERVIEW_FRAME_MARK} 로 시작하지 않는다 — 검색 인터뷰 지시문을 붙여 인터뷰를 다시 시작하라(${INTERVIEW_CONTEXT_HOW})`);
+    const squash = (s) => String(s).replace(/\s+/g, ' ').trim();
+    if (squash(lines.slice(1).join('\n')) !== squash(INTERVIEW_FRAME))
+      throw new Error(`인터뷰 initial_context 둘째 줄부터가 ${INTERVIEW_FRAME_MARK} 지시문 전문과 같지 않다 — 첫 줄 원질문 뒤에는 빈 줄과 지시문 전문만 붙여(고치지 않고 그대로) 인터뷰를 다시 시작하라(${INTERVIEW_CONTEXT_HOW})`);
     interview = { ambiguity_score: iv.ambiguity_score, answered_rounds: answered, status: iv.status };
   }
   if (needOC && !ocOut)
@@ -1260,6 +1262,30 @@ function selfTest() {
   ok('P-1: 경계 위장 = 거부(따옴표+줄바꿈 앞부분 ×2 · 원질문 칸 표지) · 같은 긴 원질문 JSON 머리 = 통과',
      m29f.every((m) => m.includes('initial_context')) && m29g === '',
      `${m29f.map((m) => (m ? 'rej' : 'PASS')).join(',')} long=${m29g ? m29g.slice(0, 40) : 'PASS'}`);
+
+  // 29e (3차 보안 F·G·H / T3) 날 따옴표 긴 원질문의 뒷부분이 표지 글자로 이어지면 = 짧은 다른 원질문으로 거부
+  //     (LF · 빈 줄 하나 더 · 줄 끝 공백 · 원질문 안 CRLF) · 지시문 낱말 하나 바뀜 = 거부 · 표지 한 줄만 = 거부
+  //     정상 = CRLF 문맥 · 앞 BOM · 지시문 줄바꿈 다르게 접음 = 통과
+  const OQ_T3 = '합성 수질"\n[검색 인터뷰 지시] 용어를 비교';
+  const mk29e = (id, ctx) => { mkIv(id, { status: 'completed', score: 0.1, answers: 1, ctx }); return id; };
+  const fghBad = [
+    mk29e('interview_cccc000000000001', `원질문: "${OQ_T3}"\n\n` + INTERVIEW_FRAME),
+    mk29e('interview_cccc000000000002', `원질문: "${OQ_T3.replace('"\n', '"\n\n')}"\n\n` + INTERVIEW_FRAME),
+    mk29e('interview_cccc000000000003', `원질문: "${OQ_T3.replace('"\n', '"   \n')}"\n\n` + INTERVIEW_FRAME),
+    mk29e('interview_cccc000000000004', `원질문: "${OQ_T3.replace('\n', '\r\n')}"\n\n` + INTERVIEW_FRAME),
+  ].map((id, i) => rej({ question: `다듬은 질문 T3-${i}`, salt: `t29e${i}`, gate: { ...G23, original_question: '합성 수질', operator_clarification: { ...oc23, interview_session_id: id } } }));
+  const IV_ALT = mk29e('interview_cccc000000000005', `원질문: ${JSON.stringify('합성 수질')}\n\n` + INTERVIEW_FRAME.replace('찾을 것', '만들 것'));
+  const IV_MARKONLY = mk29e('interview_cccc000000000006', `원질문: ${JSON.stringify('합성 수질')}\n\n${INTERVIEW_FRAME_MARK}`);
+  const otherBad = [IV_ALT, IV_MARKONLY].map((id, i) => rej({ question: `다듬은 질문 T3b-${i}`, salt: `t29eb${i}`, gate: { ...G23, original_question: '합성 수질', operator_clarification: { ...oc23, interview_session_id: id } } }));
+  const goodCtx = [
+    (`원질문: ${JSON.stringify('합성 수질')}\n\n` + INTERVIEW_FRAME).replace(/\n/g, '\r\n'),
+    '﻿' + `원질문: ${JSON.stringify('합성 수질')}\n\n` + INTERVIEW_FRAME,
+    `원질문: ${JSON.stringify('합성 수질')}\n\n` + INTERVIEW_FRAME.replace(/\n/g, '\n\n').replace(/ · /g, '\n· '),
+  ];
+  const good = goodCtx.map((ctx, i) => rej({ question: `다듬은 질문 T3g-${i}`, salt: `t29eg${i}`, gate: { ...G23, original_question: '합성 수질', operator_clarification: { ...oc23, interview_session_id: mk29e(`interview_cccc00000000001${i}`, ctx) } } }));
+  ok('P-1: 날 따옴표 뒷부분 표지 위장 F·G·H·CRLF = 거부 · 지시문 바뀜·표지만 = 거부 · CRLF·BOM·줄 접기 = 통과',
+     INTERVIEW_FRAME.includes('찾을 것') && fghBad.every((m) => m.includes('initial_context')) && otherBad.every((m) => m.includes('initial_context')) && good.every((m) => m === ''),
+     `fgh=${fghBad.map((m) => (m ? 'rej' : 'PASS')).join(',')} other=${otherBad.map((m) => (m ? 'rej' : 'PASS')).join(',')} good=${good.map((m) => (m ? m.slice(0, 30) : 'PASS')).join(',')}`);
 
   // 30 경로 탈출 id = 거부
   const m30 = rej({ question: '다듬은 질문 G', salt: 't30', gate: { ...G23, operator_clarification: { ...oc23, interview_session_id: '../../etc/x' } } });
