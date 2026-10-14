@@ -344,7 +344,7 @@ const TOOLS = [
               grade_basis: { type: 'string' },
               discard_reason: { type: 'string' },
               unreachable_reason: { type: 'string', enum: ['blocked', 'not-traced'] },
-              acquired_via: { type: 'string', enum: ['webfetch', 'aside', 'api', 'browser', 'none'], description: '페이지를 연 수단(선택) — aside 단계 기록' },
+              acquired_via: { type: 'string', enum: ['webfetch', 'aside', 'api', 'browser', 'none'], description: 'Optional. How the page was opened (webfetch / aside / api / browser / none).' },
             },
             required: ['url', 'grade', 'status'],
           },

@@ -182,11 +182,11 @@ node scripts/hide-check.mjs <조립된 프롬프트 파일>...
 매 라운드마다 조사원·리드와 다른 **새 컨텍스트의 독립 채점 서브에이전트**를 스폰한다. Claude Code는 Agent/Task, Codex는 `spawn_agent`를 쓴다. 이전 라운드 채점 문맥을 승계하거나 조사원을 채점자로 재사용하지 않는다.
 
 - 입력: 질의·유형, 프레임별 워커 산출 파일, `references/scoring.md`. 조사 워커에게 scoring.md를 전달하지 않는 기존 은닉 경계는 유지한다.
-- 출력: `out/grades-r<N>.json`. 프레임별 출처의 `grade`, `status`, `stance`(support/refute/neutral), `published`(YYYY/ YYYY-MM/ YYYY-MM-DD 또는 미확인 시 생략), 판단 근거를 기록한다. 하중 수치 최소 3건은 원문을 재확인하고 URL·원문·대조 결과를 함께 기록한다 — 원문 재확인은 aside 로 열고 grades 에 acquired_via 기록. 원문 미도달이나 대상 수치 부족은 공백으로 명시하며 대조를 꾸미지 않는다.
+- 출력: `out/grades-r<N>.json`. 프레임별 출처의 `grade`, `status`, `stance`(support/refute/neutral), `published`(YYYY/ YYYY-MM/ YYYY-MM-DD 또는 미확인 시 생략), 판단 근거를 기록한다. 하중 수치 최소 3건은 원문을 재확인하고 URL·원문·대조 결과를 함께 기록한다 — 원문 재확인은 aside 로 열고(없으면 한계 기록) grades 에 acquired_via 기록. 원문 미도달이나 대상 수치 부족은 공백으로 명시하며 대조를 꾸미지 않는다.
 - **server-owned**: 서브에이전트는 MCP 도구를 호출하지 못한다. 채점자가 파일 기록 → 리드가 그 파일의 출처 값을 **그대로 `searchflow_submit`** → 리드가 `searchflow_gate`. **리드는 등급을 재해석·수정하지 않는다.** 유효하지 않은 파일은 채점자에게 돌려보낸다.
 - **skill-owned**: 채점자가 scoring.md에 따라 축 점수·판정까지 파일에 기록하고, 리드는 그 판정을 따른다.
 - 원장·보고서 환경·한계에 `grader: independent-subagent`를 기록한다(spawn-plan 라벨 `grader=independent-subagent`). 스폰 불가·거부 환경에서만 사유와 함께 `grader=lead(degraded)`와 `grader_reason=<스폰 불가 사유>`를 명시하고 리드가 채점한다. 조용한 강등은 금지한다.
-- **채점자 유무와 무관한 aside 하한**: `grader=lead(degraded)` 이든 독립 채점자 이든, 리드는 `searchflow_gate` 전에 결론을 받치는 핵심 출처 1건 이상을 aside 로 직접 원문 재확인하고 그 항목을 `acquired_via=aside` 로 제출한다. aside 가 없는 환경이면 보고서 한계에 «aside 없음 — 리드 원문 재확인 미수행» 기록. §2 하드 게이트(로그인·페이월·CAPTCHA·robots·ToS) 페이지는 이 하한의 대상에서 빠진다 — 하중 출처가 모두 그런 페이지면 한계에 사유를 적는다.
+- **채점자 유무와 무관한 aside 하한**: `grader=lead(degraded)` 이든 독립 채점자든, 리드는 `searchflow_gate` 전에 결론을 받치는 핵심 출처 1건 이상을 aside 로 직접 원문 재확인하고 그 항목을 `acquired_via=aside` 로 제출한다. aside 가 없는 환경이면 보고서 한계에 «aside 없음 — 리드 원문 재확인 미수행» 기록. §2 하드 게이트(로그인·페이월·CAPTCHA·robots·ToS) 페이지는 이 하한의 대상에서 빠진다 — 하중 출처가 모두 그런 페이지면 한계에 사유를 적는다.
 - 재조사는 최대 3회다. 각 재조사 후 채점자도 새로 스폰한다.
 
 등급 기준 · 축 가중치 · 문턱은 **`references/scoring.md`(🔒 독립 채점자 전용)** 에 있다. 이 파일과 `references/frames.md` · `acquisition.md` · `report-contract.md` 에는 그 수치가 없다 — 워커 프롬프트가 이 경로만 밟도록 조립하기 때문이다(§P2.5).
