@@ -137,7 +137,7 @@ node scripts/robots-gate.mjs <대상 URL> [...]
   결론으로 굳히지 않고 확인 여부를 findings 의 claim 에 1줄 적는다.
   robots.txt·ToS·페이월·CAPTCHA 는 우회하지 않는다 — 미도달로 기록한다.
   2차 자료를 근거로 쓸 때는 원본 링크 추적을 1회 시도하고, 실패하면 "원본 미도달"이라 적는다.
-  페이지 열기 = acquisition.md 사다리. WebFetch 로 안 열리거나 JS 렌더가 필요하거나 접근이 막힌 사이트·SNS 일 때만 aside(없으면 건너뛰고 한계 기록) · 로그인/페이월/CAPTCHA/robots·ToS 차단은 aside 로도 열지 않음 · 제출 시 acquired_via(webfetch|aside|api|browser|none) 기록.
+  페이지 열기 = acquisition.md 사다리. WebFetch 로 안 열리거나 JS 렌더가 필요하거나, WebFetch 로는 안 열리지만 브라우저로는 누구나 볼 수 있는 공개 페이지·SNS 일 때만 aside(없으면 다른 브라우저 도구, 그것도 없으면 건너뛰고 한계 기록) · 로그인/페이월/CAPTCHA/robots·ToS 차단은 aside 로도 열지 않음 · 제출 시 acquired_via(webfetch|aside|api|browser|none) 기록.
 
 반환(JSON):
 {
@@ -182,7 +182,7 @@ node scripts/hide-check.mjs <조립된 프롬프트 파일>...
 매 라운드마다 조사원·리드와 다른 **새 컨텍스트의 독립 채점 서브에이전트**를 스폰한다. Claude Code는 Agent/Task, Codex는 `spawn_agent`를 쓴다. 이전 라운드 채점 문맥을 승계하거나 조사원을 채점자로 재사용하지 않는다.
 
 - 입력: 질의·유형, 프레임별 워커 산출 파일, `references/scoring.md`. 조사 워커에게 scoring.md를 전달하지 않는 기존 은닉 경계는 유지한다.
-- 출력: `out/grades-r<N>.json`. 프레임별 출처의 `grade`, `status`, `stance`(support/refute/neutral), `published`(YYYY/ YYYY-MM/ YYYY-MM-DD 또는 미확인 시 생략), 판단 근거를 기록한다. 하중 수치 최소 3건은 원문을 재확인하고 URL·원문·대조 결과를 함께 기록한다 — 원문 재확인 때 WebFetch 로 안 열리는 페이지만 aside 로 열고(없으면 한계 기록) grades 에 acquired_via 기록. 원문 미도달이나 대상 수치 부족은 공백으로 명시하며 대조를 꾸미지 않는다.
+- 출력: `out/grades-r<N>.json`. 프레임별 출처의 `grade`, `status`, `stance`(support/refute/neutral), `published`(YYYY/ YYYY-MM/ YYYY-MM-DD 또는 미확인 시 생략), 판단 근거를 기록한다. 하중 수치 최소 3건은 원문을 재확인하고 URL·원문·대조 결과를 함께 기록한다 — 원문 재확인 때 사다리 ③ 조건에 맞는 페이지만 aside 로 열고(없으면 한계 기록) grades 에 acquired_via 기록. 원문 미도달이나 대상 수치 부족은 공백으로 명시하며 대조를 꾸미지 않는다.
 - **server-owned**: 서브에이전트는 MCP 도구를 호출하지 못한다. 채점자가 파일 기록 → 리드가 그 파일의 출처 값을 **그대로 `searchflow_submit`** → 리드가 `searchflow_gate`. **리드는 등급을 재해석·수정하지 않는다.** 유효하지 않은 파일은 채점자에게 돌려보낸다.
 - **skill-owned**: 채점자가 scoring.md에 따라 축 점수·판정까지 파일에 기록하고, 리드는 그 판정을 따른다.
 - 원장·보고서 환경·한계에 `grader: independent-subagent`를 기록한다(spawn-plan 라벨 `grader=independent-subagent`). 스폰 불가·거부 환경에서만 사유와 함께 `grader=lead(degraded)`와 `grader_reason=<스폰 불가 사유>`를 명시하고 리드가 채점한다. 조용한 강등은 금지한다.
