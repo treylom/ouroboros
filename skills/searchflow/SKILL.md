@@ -137,7 +137,7 @@ node scripts/robots-gate.mjs <대상 URL> [...]
   결론으로 굳히지 않고 확인 여부를 findings 의 claim 에 1줄 적는다.
   robots.txt·ToS·페이월·CAPTCHA 는 우회하지 않는다 — 미도달로 기록한다.
   2차 자료를 근거로 쓸 때는 원본 링크 추적을 1회 시도하고, 실패하면 "원본 미도달"이라 적는다.
-  페이지 열기 = acquisition.md 사다리. WebFetch 로 안 열리거나 JS 렌더가 필요하거나, WebFetch 로는 안 열리지만 브라우저로는 누구나 볼 수 있는 공개 페이지·SNS 일 때만 aside(없으면 다른 브라우저 도구, 그것도 없으면 건너뛰고 한계 기록) · 로그인/페이월/CAPTCHA/robots·ToS 차단은 aside 로도 열지 않음 · 제출 시 acquired_via(webfetch|aside|api|browser|none) 기록.
+  페이지 열기 = acquisition.md 사다리. WebFetch 로 안 열리거나 JS 렌더가 필요하거나 브라우저로만 볼 수 있는 공개 페이지·SNS 일 때만 aside(없으면 다른 브라우저 도구, 그것도 없으면 건너뛰고 한계 기록) · 로그인/페이월/CAPTCHA/robots·ToS 차단은 aside 로도 열지 않음 · 제출 시 acquired_via(webfetch|aside|api|browser|none) 기록.
 
 반환(JSON):
 {
