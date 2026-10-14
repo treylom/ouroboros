@@ -390,7 +390,7 @@ function workerBrief(question, frameId, focus, deadline) {
     '취득: 공개된 경로만 쓴다. robots.txt·이용약관·페이월·자동입력 방지는 우회하지 않는다 — 못 읽었으면 못 읽었다고 적는다.',
     '  탐색 순서: 최신 발행분부터 연다. 오래된 자료를 근거로 쓸 때는 더 최신의 정정·후속이 있는지 확인한다.',
     '  2차 자료를 근거로 쓸 때는 원본 링크 추적을 1회 시도하고, 실패하면 "원본 미도달"이라 적는다.',
-    '  페이지 열기 = acquisition.md 사다리. 핵심 출처 원본 확인·WebFetch 실패·JS 렌더는 aside(없으면 건너뛰고 한계 기록) · 로그인/페이월/CAPTCHA/robots·ToS 차단은 aside 로도 열지 않음 · 제출 시 acquired_via(webfetch|aside|api|browser|none) 기록.',
+    '  페이지 열기 = acquisition.md 사다리. WebFetch 로 안 열리거나 JS 렌더가 필요하거나 접근이 막힌 사이트·SNS 일 때만 aside(없으면 건너뛰고 한계 기록) · 로그인/페이월/CAPTCHA/robots·ToS 차단은 aside 로도 열지 않음 · 제출 시 acquired_via(webfetch|aside|api|browser|none) 기록.',
     '',
     '반환: 본 출처를 버린 것까지 전부 findings 파일로 리드에게 돌려준다. MCP 도구를 직접 호출하지 않는다.',
     '  url · claim · verbatim · accessed_at · 확인 가능한 발행일과 반대 증거를 포함한다.',
