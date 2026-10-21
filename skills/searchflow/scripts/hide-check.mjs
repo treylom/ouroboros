@@ -6,7 +6,7 @@
 //   stdout : 누출 매치 목록 (파일:라인:패턴) · 면제 매치는 `면제(질문 원문)` 꼬리표로 따로 찍는다
 //   exit   : 0=PASS · 1=FAIL(누출 또는 **검사기 사망**) · 2=스크립트 오류(**통과 취급 ❌**)
 //
-// 질문 원문 구간 면제 (10-21 · sf-1gg11zm 오탐 6건):
+// 질문 원문 구간 면제 (0.55.9 · 질문의 주제 숫자 오탐):
 //   워커 브리프는 운영자 질문을 그대로 싣는다(mcp-server workerBrief `질의: …`). 질문은 운영자 입력이지
 //   리드 전용 층이 아니다. 그런데 질문에 `15~60%`·`관련80%` 같은 주제 숫자가 있으면 `60|70|80 %` 패턴이
 //   그걸 기준 누출로 잡았다. 그래서 **브리프 안에서 질문 줄을 그대로 옮긴 구간**에 완전히 들어간 매치만
@@ -317,7 +317,7 @@ function selfTest() {
     detail: `${nHits.length}건 ${nHits.map(h => h.match).join(',')}`,
   });
 
-  // ── 질문 원문 구간 면제 (10-21 · sf-1gg11zm 오탐) ──
+  // ── 질문 원문 구간 면제 (0.55.9 · 질문의 주제 숫자 오탐) ──
   // 원 사건 모양 그대로: 질문 줄에 주제 숫자 `15~60%`·`관련80%` 가 있고, 브리프가 `질의: ` 뒤에 그 줄을 싣는다.
   const q = [
     '지식 기반에서 새로운 가설을 발산시키는 방법은?',
@@ -362,7 +362,7 @@ function selfTest() {
   });
 
   // 양성 — 질문 줄 «전체»를 옮긴 뒤 같은 줄에 기준을 덧붙이면, 덧붙인 쪽은 잡힌다(구간 밖)
-  //   insideSpan 을 «줄에 질문이 있으면 전부 면제»로 망가뜨리면 여기서 FAIL 한다(검증자 변이 D2).
+  //   insideSpan 을 «줄에 질문이 있으면 전부 면제»로 망가뜨리면 여기서 FAIL 한다(변이 시험).
   const qFull = qLines[1];
   const sameLine = scanText(`질의: ${qFull} 합격선 80%`, '(q-sameline)', patterns, qLines);
   const slLeak = sameLine.filter(h => !h.exempt).map(h => h.match);
@@ -374,7 +374,7 @@ function selfTest() {
   });
 
   // 양성 — 매치가 질문 구간 경계에 걸치면 면제 아님
-  //   insideSpan 을 «겹치면 면제»로 망가뜨리면 여기서 FAIL 한다(검증자 변이 D2).
+  //   insideSpan 을 «겹치면 면제»로 망가뜨리면 여기서 FAIL 한다(변이 시험).
   //   질문 줄이 `…관련8` 로 끝나고 브리프가 `…관련80%` 로 이어지면 `80%` 는 구간에 걸친다.
   const qEdge = '경계 시험용 질문 줄입니다 관련8';
   const edge = scanText(`${qEdge}0% 이상`, '(q-edge)', patterns, questionLines(qEdge));
@@ -439,8 +439,19 @@ function selfTest() {
     const pl = passLine(rs.stdout);
     results.push({
       name: '본 경로 — --session 면제 ≥1 이면 PASS 줄에 «면제 N건 — 사람 확인»',
-      ok: rs.status === 0 && /면제 2건 — 사람 확인/.test(pl),
+      ok: rs.status === 0 && /면제 2건 — 사람 확인/.test(pl) && pl.includes('SEARCHFLOW_STATE_DIR='),
       detail: `exit=${rs.status} ${pl || rs.stderr.split('\n')[0]}`,
+    });
+
+    // 누출 줄에도 — 면제가 있고 질문 밖 기준 문구가 있으면 exit 1, 누출 줄에 «사람 확인»
+    const briefLeak = join(tmp, 'brief-leak.txt');
+    writeFileSync(briefLeak, `${briefOnlyQ}\n이 축의 합격선은 80% 다.\n`);
+    const rl = runSelf(['--session', 'sf-selftest1', briefLeak], { SEARCHFLOW_STATE_DIR: tmp });
+    const ll = rl.stdout.split('\n').find(l => l.startsWith('누출')) || '';
+    results.push({
+      name: '본 경로 — 누출이 있어도 면제 ≥1 이면 누출 줄에 «면제 N건 — 사람 확인»',
+      ok: rl.status === 1 && /면제 2건 — 사람 확인/.test(ll),
+      detail: `exit=${rl.status} ${ll || rl.stderr.split('\n')[0]}`,
     });
 
     // 음성 짝 — 면제 0건이면 «사람 확인» 을 찍지 않는다(문구가 늘 붙는 것이 아님)
@@ -510,9 +521,11 @@ try {
   // 면제는 조용히 하지 않는다 — 누출이든 PASS 든 면제 매치를 먼저 다 찍는다.
   for (const h of exempt) console.log(fmt(h));
   // 면제가 1건이라도 있으면 사람 확인을 요구한다 — 자가 점검이라 의도적 우회는 못 막는다.
+  // 원장 위치를 환경변수로 바꿨으면 그것도 같은 줄에 드러낸다(다른 원장을 가리키는 우회가 사람 눈에 보이게).
+  const stateNote = process.env.SEARCHFLOW_STATE_DIR ? ` · 원장 위치 SEARCHFLOW_STATE_DIR=${process.env.SEARCHFLOW_STATE_DIR}` : '';
   const exNote = !question ? ''
     : exempt.length
-      ? ` · ⚠️ 면제 ${exempt.length}건 — 사람 확인(위 «면제(질문 원문)» 줄 · 질문 줄 ${qLines.length}개)`
+      ? ` · ⚠️ 면제 ${exempt.length}건 — 사람 확인(위 «면제(질문 원문)» 줄 · 질문 줄 ${qLines.length}개${stateNote})`
       : ' · 면제 0건';
 
   if (hits.length) {
