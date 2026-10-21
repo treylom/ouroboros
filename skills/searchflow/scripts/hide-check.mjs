@@ -2,7 +2,7 @@
 // hide-check.mjs — 조립된 워커 프롬프트에서 리드 전용 수치 누출을 검사한다.
 //
 // 계약 (21-implementation-spec §2-6 ABI):
-//   argv   : [--session <sf-id> | --question <질문 파일>] <조립된 워커 프롬프트 파일>...  |  --test
+//   argv   : [--session <sf-id>] <조립된 워커 프롬프트 파일>...  |  --test
 //   stdout : 누출 매치 목록 (파일:라인:패턴) · 면제 매치는 `면제(질문 원문)` 꼬리표로 따로 찍는다
 //   exit   : 0=PASS · 1=FAIL(누출 또는 **검사기 사망**) · 2=스크립트 오류(**통과 취급 ❌**)
 //
@@ -11,13 +11,15 @@
 //   리드 전용 층이 아니다. 그런데 질문에 `15~60%`·`관련80%` 같은 주제 숫자가 있으면 `60|70|80 %` 패턴이
 //   그걸 기준 누출로 잡았다. 그래서 **브리프 안에서 질문 줄을 그대로 옮긴 구간**에 완전히 들어간 매치만
 //   면제한다. 값(토큰) 기준 면제가 아니다 — 질문에 60% 가 있어도 리드가 따로 적은 `합격선 60%` 는 잡힌다.
-//   · 면제 원천 = `--session` (서버 원장 start.question · 권장) 또는 `--question` (파일).
+//   · 운영 면제 원천 = `--session` (서버 원장 start.question) **하나뿐**이다. `--question <파일>` 은 셀프테스트
+//     안에서만 쓰고, 본 경로에서 받으면 exit 2 로 거부한다 — 리드가 만든 파일을 면제 원천으로 삼는 길을 닫는다.
 //   · 8자 미만 질문 줄은 가림에 쓰지 않는다(짧은 줄이 넓게 가리는 것 방지 → 오탐 쪽으로 남김).
 //   · 양성 fixture 생존 검사는 가림 없이 원문 그대로 본다.
-//   · 면제는 조용히 하지 않는다 — 매치마다 stdout 에 찍고 PASS 줄에 건수를 적는다.
+//   · 면제는 조용히 하지 않는다 — 매치마다 stdout 에 찍고, 1건 이상이면 PASS·누출 줄에 `면제 N건 — 사람 확인` 을 찍는다.
+//   · 이 검사는 자가 점검이다. 질문 자체에 기준 수치를 넣는 식의 의도적 우회는 못 막는다 → 면제 줄을 사람이 본다.
 //   · 플래그가 없으면 종전과 같은 거동이다.
 //   · 면제는 11개 패턴 전부에 적용된다(숫자층만이 아님) — 질문 줄은 어휘(예: weights)까지 포함해 운영자 입력이기 때문.
-//   · 질문 파일이 검사 대상 자신이면 거부 · `--question=값` 등호형은 거부(조용히 무시 ❌).
+//   · (셀프테스트 경로) 질문 파일이 검사 대상 자신이면 거부 · `--question=값`·`--session=값` 등호형은 거부(조용히 무시 ❌).
 //
 // 금칙 패턴 SoT = references/scoring.md 머리의 `<!-- HIDE-TOKENS: ... -->` 선언부 **한 곳뿐**.
 // 여기에 패턴을 복제하지 않는다 — 이중 관리는 한쪽만 갱신되는 순간 은닉이 조용히 얇아진다.
@@ -27,12 +29,14 @@
 //
 // 외부 패키지 0 (node: 내장만).
 
-import { readFileSync, existsSync, realpathSync } from 'node:fs';
+import { readFileSync, existsSync, realpathSync, mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { dirname, resolve, join } from 'node:path';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
+const SELF = fileURLToPath(import.meta.url);   // 셀프테스트가 본 경로를 하위 프로세스로 돌릴 때 쓴다(변이 사본이면 그 사본)
+const SCRIPT_DIR = dirname(SELF);
 const SKILL_DIR = resolve(SCRIPT_DIR, '..');
 const SCORING = join(SKILL_DIR, 'references', 'scoring.md');
 const POSITIVE = join(SKILL_DIR, 'fixtures', 'hide-positive.txt');
@@ -161,8 +165,16 @@ function questionFromSession(id) {
   throw new ScriptError(`세션 원장에 start.question 이 없다 — ${p}`);
 }
 
-/** argv → { test, targets, question }. 값을 받는 플래그의 값이 대상으로 새지 않게 한다. */
-function parseArgs(argv) {
+/** 본 경로가 --question 을 받았을 때의 안내(exit 2). */
+const QUESTION_MAIN_REFUSED =
+  '--question 은 셀프테스트(--test) 안에서만 받는다 — 운영 면제 원천은 --session <세션 id>(서버 원장 start.question) 하나뿐이다. ' +
+  '원장이 없으면 플래그 없이 돌리고, 걸린 매치는 사람이 보고 판단한다';
+
+/**
+ * argv → { test, targets, question }. 값을 받는 플래그의 값이 대상으로 새지 않게 한다.
+ * allowQuestion = 셀프테스트만 true. 본 경로는 --question 을 거부한다(운영 원천 = --session 뿐).
+ */
+function parseArgs(argv, { allowQuestion = false } = {}) {
   const out = { test: false, targets: [], question: null, questionPath: null };
   let qSources = 0;
   for (let i = 0; i < argv.length; i++) {
@@ -171,6 +183,7 @@ function parseArgs(argv) {
     if (/^--(question|session)=/.test(a)) {
       throw new ScriptError(`${a.split('=')[0]} 는 등호형을 받지 않는다 — '${a.split('=')[0]} <값>' 으로 띄어 쓴다`);
     }
+    if (a === '--question' && !allowQuestion) throw new ScriptError(QUESTION_MAIN_REFUSED);
     if (a === '--question' || a === '--session') {
       const v = argv[i + 1];
       if (v === undefined || v.startsWith('--')) throw new ScriptError(`${a} 뒤에 값이 없다`);
@@ -397,6 +410,61 @@ function selfTest() {
     detail: `${shortQ.length}건 · 면제 ${shortQ.filter(h => h.exempt).length}`,
   });
 
+  // ── 본 경로 실행 시험 (하위 프로세스로 실제 CLI 를 돌린다) ──
+  const tmp = mkdtempSync(join(tmpdir(), 'hide-check-selftest-'));
+  try {
+    const runSelf = (argv, env = {}) => spawnSync(process.execPath, [SELF, ...argv], {
+      encoding: 'utf8', env: { ...process.env, ...env },
+    });
+    const qFile = join(tmp, 'question.txt');
+    const briefQ = join(tmp, 'brief-q.txt');
+    const briefPlain = join(tmp, 'brief-plain.txt');
+    writeFileSync(qFile, q);
+    writeFileSync(briefQ, `${briefOnlyQ}\n`);
+    writeFileSync(briefPlain, '질의: 공개 문서에서 규격 변경 이력을 찾는다\n반환: findings 파일로 리드에게 돌려준다.\n');
+    mkdirSync(join(tmp, 'sessions'));
+    writeFileSync(join(tmp, 'sessions', 'sf-selftest1.jsonl'), `${JSON.stringify({ event: 'start', question: q })}\n`);
+    const passLine = out => (out.split('\n').find(l => l.startsWith('PASS')) || '');
+
+    // 본 경로 --question 거부 — exit 2 + 안내(--session 을 가리킨다)
+    const rq = runSelf(['--question', qFile, briefQ]);
+    results.push({
+      name: '본 경로 — --question 은 거부한다(exit 2 · --session 안내)',
+      ok: rq.status === 2 && rq.stderr.includes('--session') && rq.stderr.includes('셀프테스트'),
+      detail: `exit=${rq.status} ${rq.stderr.split('\n')[0]}`,
+    });
+
+    // 본 경로 --session · 면제 ≥1 → PASS 줄에 «면제 N건 — 사람 확인»
+    const rs = runSelf(['--session', 'sf-selftest1', briefQ], { SEARCHFLOW_STATE_DIR: tmp });
+    const pl = passLine(rs.stdout);
+    results.push({
+      name: '본 경로 — --session 면제 ≥1 이면 PASS 줄에 «면제 N건 — 사람 확인»',
+      ok: rs.status === 0 && /면제 2건 — 사람 확인/.test(pl),
+      detail: `exit=${rs.status} ${pl || rs.stderr.split('\n')[0]}`,
+    });
+
+    // 음성 짝 — 면제 0건이면 «사람 확인» 을 찍지 않는다(문구가 늘 붙는 것이 아님)
+    const r0 = runSelf(['--session', 'sf-selftest1', briefPlain], { SEARCHFLOW_STATE_DIR: tmp });
+    const pl0 = passLine(r0.stdout);
+    results.push({
+      name: '본 경로 — 면제 0건이면 «사람 확인» 없음(음성 짝)',
+      ok: r0.status === 0 && pl0.includes('면제 0건') && !pl0.includes('사람 확인'),
+      detail: `exit=${r0.status} ${pl0 || r0.stderr.split('\n')[0]}`,
+    });
+
+    // 셀프테스트 경로만 --question 을 받는다 — 받되 자기 자신을 원천으로 주면 거부
+    let accepted = false, selfRefused = false;
+    try { accepted = parseArgs(['--question', qFile, briefQ], { allowQuestion: true }).question === q; } catch { /* accepted=false */ }
+    try { parseArgs(['--question', qFile, qFile], { allowQuestion: true }); } catch (err) { selfRefused = err instanceof ScriptError; }
+    results.push({
+      name: '셀프테스트 경로 — --question 을 받고, 자기 자신 원천은 거부',
+      ok: accepted && selfRefused,
+      detail: `받음=${accepted} · 자기 자신 거부=${selfRefused}`,
+    });
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+
   let failed = 0;
   for (const r of results) {
     console.log(`${r.ok ? 'PASS' : 'FAIL'}  ${r.name}\n      ${r.detail}`);
@@ -414,7 +482,7 @@ try {
   const patterns = loadPatterns();
   const { targets, question } = parseArgs(args);
   if (!targets.length) {
-    console.error('usage: hide-check.mjs [--session <sf-id> | --question <질문 파일>] <조립된 워커 프롬프트 파일>... | --test');
+    console.error('usage: hide-check.mjs [--session <sf-id>] <조립된 워커 프롬프트 파일>... | --test');
     process.exit(2);
   }
   const qLines = questionLines(question);
@@ -441,7 +509,11 @@ try {
 
   // 면제는 조용히 하지 않는다 — 누출이든 PASS 든 면제 매치를 먼저 다 찍는다.
   for (const h of exempt) console.log(fmt(h));
-  const exNote = question ? ` · 면제 ${exempt.length}건(질문 원문 구간 · 질문 줄 ${qLines.length}개)` : '';
+  // 면제가 1건이라도 있으면 사람 확인을 요구한다 — 자가 점검이라 의도적 우회는 못 막는다.
+  const exNote = !question ? ''
+    : exempt.length
+      ? ` · ⚠️ 면제 ${exempt.length}건 — 사람 확인(위 «면제(질문 원문)» 줄 · 질문 줄 ${qLines.length}개)`
+      : ' · 면제 0건';
 
   if (hits.length) {
     for (const h of hits) console.log(fmt(h));
