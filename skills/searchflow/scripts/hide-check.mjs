@@ -2,9 +2,20 @@
 // hide-check.mjs — 조립된 워커 프롬프트에서 리드 전용 수치 누출을 검사한다.
 //
 // 계약 (21-implementation-spec §2-6 ABI):
-//   argv   : <조립된 워커 프롬프트 파일>...  |  --test
-//   stdout : 누출 매치 목록 (파일:라인:패턴)
+//   argv   : [--session <sf-id> | --question <질문 파일>] <조립된 워커 프롬프트 파일>...  |  --test
+//   stdout : 누출 매치 목록 (파일:라인:패턴) · 면제 매치는 `면제(질문 원문)` 꼬리표로 따로 찍는다
 //   exit   : 0=PASS · 1=FAIL(누출 또는 **검사기 사망**) · 2=스크립트 오류(**통과 취급 ❌**)
+//
+// 질문 원문 구간 면제 (10-21 · sf-1gg11zm 오탐 6건):
+//   워커 브리프는 운영자 질문을 그대로 싣는다(mcp-server workerBrief `질의: …`). 질문은 운영자 입력이지
+//   리드 전용 층이 아니다. 그런데 질문에 `15~60%`·`관련80%` 같은 주제 숫자가 있으면 `60|70|80 %` 패턴이
+//   그걸 기준 누출로 잡았다. 그래서 **브리프 안에서 질문 줄을 그대로 옮긴 구간**에 완전히 들어간 매치만
+//   면제한다. 값(토큰) 기준 면제가 아니다 — 질문에 60% 가 있어도 리드가 따로 적은 `합격선 60%` 는 잡힌다.
+//   · 면제 원천 = `--session` (서버 원장 start.question · 권장) 또는 `--question` (파일).
+//   · 8자 미만 질문 줄은 가림에 쓰지 않는다(짧은 줄이 넓게 가리는 것 방지 → 오탐 쪽으로 남김).
+//   · 양성 fixture 생존 검사는 가림 없이 원문 그대로 본다.
+//   · 면제는 조용히 하지 않는다 — 매치마다 stdout 에 찍고 PASS 줄에 건수를 적는다.
+//   · 플래그가 없으면 종전과 같은 거동이다.
 //
 // 금칙 패턴 SoT = references/scoring.md 머리의 `<!-- HIDE-TOKENS: ... -->` 선언부 **한 곳뿐**.
 // 여기에 패턴을 복제하지 않는다 — 이중 관리는 한쪽만 갱신되는 순간 은닉이 조용히 얇아진다.
@@ -14,8 +25,9 @@
 //
 // 외부 패키지 0 (node: 내장만).
 
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, realpathSync } from 'node:fs';
 import { dirname, resolve, join } from 'node:path';
+import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
@@ -54,16 +66,51 @@ function loadPatterns() {
   return out;
 }
 
-/** 한 텍스트에서 누출 매치 목록. label 은 출력용 경로/이름. */
-function scanText(text, label, patterns) {
+/** 가림에 쓰는 질문 줄의 최소 길이(NFC·trim 뒤 글자 수). 이보다 짧은 줄은 가리지 않는다. */
+const QUESTION_MIN_LINE = 8;
+
+/** 질문 원문 → 가림용 줄 목록(NFC·trim·짧은 줄 제외·중복 제거). */
+function questionLines(question) {
+  if (!question) return [];
+  const seen = new Set();
+  for (const raw of nfc(question).split('\n')) {
+    const l = raw.trim();
+    if ([...l].length >= QUESTION_MIN_LINE) seen.add(l);
+  }
+  return [...seen];
+}
+
+/** 한 줄 안에서 질문 줄을 그대로 옮긴 구간들 [start, end). */
+function questionSpans(line, qLines) {
+  const spans = [];
+  for (const q of qLines) {
+    let from = 0, at;
+    while ((at = line.indexOf(q, from)) !== -1) {
+      spans.push([at, at + q.length]);
+      from = at + 1;
+    }
+  }
+  return spans;
+}
+
+/** 매치 [s, e) 가 한 구간 안에 완전히 들어가는가. 걸치기만 하면 면제 아님. */
+const insideSpan = (s, e, spans) => spans.some(([a, b]) => a <= s && e <= b);
+
+/**
+ * 한 텍스트에서 누출 매치 목록. label 은 출력용 경로/이름.
+ * qLines 가 주어지면 질문 원문 구간 안의 매치는 exempt:true 로 표시한다(버리지 않는다).
+ */
+function scanText(text, label, patterns, qLines = []) {
   const hits = [];
   const lines = nfc(text).split('\n');
   lines.forEach((line, i) => {
+    const spans = qLines.length ? questionSpans(line, qLines) : [];
     for (const { src, re } of patterns) {
       re.lastIndex = 0;
       let mm;
       while ((mm = re.exec(line)) !== null) {
-        hits.push({ file: label, line: i + 1, pattern: src, match: mm[0] });
+        const exempt = spans.length > 0 && insideSpan(mm.index, mm.index + mm[0].length, spans);
+        hits.push({ file: label, line: i + 1, pattern: src, match: mm[0], exempt });
         if (mm.index === re.lastIndex) re.lastIndex += 1;   // 폭 0 매치 무한루프 방어
       }
     }
@@ -71,12 +118,68 @@ function scanText(text, label, patterns) {
   return hits;
 }
 
-function scanFile(path, patterns) {
+function scanFile(path, patterns, qLines = []) {
   if (!existsSync(path)) throw new ScriptError(`검사 대상 부재 — ${path}`);
-  return scanText(readFileSync(path, 'utf8'), path, patterns);
+  return scanText(readFileSync(path, 'utf8'), path, patterns, qLines);
 }
 
-const fmt = h => `${h.file}:${h.line}:${h.pattern} | match="${h.match}"`;
+const fmt = h => `${h.file}:${h.line}:${h.pattern} | match="${h.match}"${h.exempt ? ' | 면제(질문 원문)' : ''}`;
+
+/** 면제 원천이 리드 전용 층이면 거부 — scoring.md 를 질문으로 넘기면 전부 가려진다. */
+function guardQuestion(text, origin) {
+  if (/HIDE-TOKENS/.test(text)) {
+    throw new ScriptError(`질문 원천에 HIDE-TOKENS 선언부가 있다 — 리드 전용 층을 면제 원천으로 쓸 수 없다 (${origin})`);
+  }
+  if (!text.trim()) throw new ScriptError(`질문 원문이 비어 있다 (${origin})`);
+  return text;
+}
+
+/** --question <파일> */
+function questionFromFile(path) {
+  if (!existsSync(path)) throw new ScriptError(`질문 파일 부재 — ${path}`);
+  let same = false;
+  try { same = realpathSync(path) === realpathSync(SCORING); } catch { /* scoring 부재는 loadPatterns 가 잡는다 */ }
+  if (same) throw new ScriptError(`질문 파일이 scoring.md 다 — 리드 전용 층을 면제 원천으로 쓸 수 없다`);
+  return guardQuestion(readFileSync(path, 'utf8'), path);
+}
+
+/** --session <sf-id> — 서버 원장(start 이벤트)의 question. 경로 규칙 = mcp-server stateDir(). */
+function questionFromSession(id) {
+  if (!/^sf-[A-Za-z0-9-]+$/.test(id)) throw new ScriptError(`세션 id 형식이 아니다 — ${id}`);
+  const env = process.env.SEARCHFLOW_STATE_DIR;
+  const base = env ? resolve(env) : join(homedir(), '.searchflow');
+  const p = join(base, 'sessions', `${id}.jsonl`);
+  if (!existsSync(p)) throw new ScriptError(`세션 원장 부재 — ${p}`);
+  for (const raw of readFileSync(p, 'utf8').split('\n')) {
+    if (!raw.trim()) continue;
+    let ev;
+    try { ev = JSON.parse(raw); } catch { continue; }
+    if (ev && ev.event === 'start' && typeof ev.question === 'string') return guardQuestion(ev.question, p);
+  }
+  throw new ScriptError(`세션 원장에 start.question 이 없다 — ${p}`);
+}
+
+/** argv → { test, targets, question }. 값을 받는 플래그의 값이 대상으로 새지 않게 한다. */
+function parseArgs(argv) {
+  const out = { test: false, targets: [], question: null };
+  let qSources = 0;
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--test') { out.test = true; continue; }
+    if (a === '--question' || a === '--session') {
+      const v = argv[i + 1];
+      if (v === undefined || v.startsWith('--')) throw new ScriptError(`${a} 뒤에 값이 없다`);
+      i += 1;
+      qSources += 1;
+      out.question = a === '--question' ? questionFromFile(v) : questionFromSession(v);
+      continue;
+    }
+    if (a.startsWith('--')) continue;   // 종전 거동: 모르는 플래그는 대상에서 뺀다
+    out.targets.push(a);
+  }
+  if (qSources > 1) throw new ScriptError('--question 과 --session 은 하나만 준다');
+  return out;
+}
 
 /**
  * 양성 대조 — 고의 오염 fixture 가 잡히는지.
@@ -186,6 +289,76 @@ function selfTest() {
     detail: `${nHits.length}건 ${nHits.map(h => h.match).join(',')}`,
   });
 
+  // ── 질문 원문 구간 면제 (10-21 · sf-1gg11zm 오탐) ──
+  // 원 사건 모양 그대로: 질문 줄에 주제 숫자 `15~60%`·`관련80%` 가 있고, 브리프가 `질의: ` 뒤에 그 줄을 싣는다.
+  const q = [
+    '지식 기반에서 새로운 가설을 발산시키는 방법은?',
+    '씨앗: 중간교란→통과율 관리(15~60%); 도핑→관련80%·먼분야20%.',
+  ].join('\n');
+  const qLines = questionLines(q);
+  const briefOnlyQ = `질의: ${q}\n담당 축: f1 — 공식 규격\n반환: findings 파일로 리드에게 돌려준다.`;
+
+  // 음성 — 질문 원문 안의 60%·80% 는 누출이 아니다(면제로 보이게 남는다)
+  const qNeg = scanText(briefOnlyQ, '(q-neg)', patterns, qLines);
+  const qNegLeak = qNeg.filter(h => !h.exempt), qNegEx = qNeg.filter(h => h.exempt);
+  results.push({
+    name: '음성 대조 — 질문 원문 구간의 60%·80% 는 누출 0건(면제 ≥2 로 표시)',
+    ok: qNegLeak.length === 0 && qNegEx.length >= 2,
+    detail: `누출 ${qNegLeak.length}건 · 면제 ${qNegEx.length}건 ${qNegEx.map(h => h.match).join(',')}`,
+  });
+
+  // 대조 — 같은 브리프를 질문 없이 보면 종전처럼 잡힌다(면제가 실제로 일한 것인지)
+  const qNoFlag = scanText(briefOnlyQ, '(q-noflag)', patterns);
+  results.push({
+    name: '대조 — 질문을 안 주면 같은 브리프가 종전대로 걸린다(≥2)',
+    ok: qNoFlag.length >= 2 && qNoFlag.every(h => !h.exempt),
+    detail: `${qNoFlag.length}건`,
+  });
+
+  // 양성 — 질문에 80% 가 있어도, 리드가 질문 밖에 적은 기준 문구는 잡힌다(값 면제가 아니라 구간 면제)
+  const qPos = scanText(`${briefOnlyQ}\n이 축의 합격선은 80% 다.\n통과선 0.70 을 넘겨라.`, '(q-pos)', patterns, qLines);
+  const qPosLeak = qPos.filter(h => !h.exempt);
+  const posMatches = new Set(qPosLeak.map(h => h.match));
+  results.push({
+    name: '양성 대조 — 질문에 80% 가 있어도 질문 밖 기준 문구(합격선 80%·0.70)는 누출로 잡힌다',
+    ok: posMatches.has('80%') && posMatches.has('0.70') && qPosLeak.some(h => h.match === '합격선'),
+    detail: `누출 ${qPosLeak.length}건 ${qPosLeak.map(h => h.match).join(',')}`,
+  });
+
+  // 양성 — 질문 줄 일부만 옮기고 값을 덧붙인 구간은 면제 아님(걸치기 ❌)
+  const partial = scanText('씨앗: 중간교란→통과율 관리(15~60%); 도핑→관련80%', '(q-partial)', patterns, qLines);
+  results.push({
+    name: '양성 대조 — 질문 줄을 끝까지 옮기지 않은 구간은 면제 안 함',
+    ok: partial.filter(h => !h.exempt).length >= 1,
+    detail: `누출 ${partial.filter(h => !h.exempt).length}건`,
+  });
+
+  // 생존 — 질문을 줘도 양성 fixture 는 가림 없이 본다
+  let posQ = [];
+  try { posQ = livenessOrDie(patterns); } catch { /* 위 양성 대조가 이미 FAIL */ }
+  results.push({
+    name: '생존 — 질문 면제가 있어도 fixture 검출 수 불변(fixture 는 가리지 않는다)',
+    ok: posQ.length === pos.length && posQ.length >= 1 && posQ.every(h => !h.exempt),
+    detail: `${posQ.length}건 (기준 ${pos.length}건)`,
+  });
+
+  // 가드 — 리드 전용 층을 면제 원천으로 넘기면 스크립트 오류
+  let guardOk = false, guardMsg = '';
+  try { questionFromFile(SCORING); } catch (err) { guardOk = err instanceof ScriptError; guardMsg = err.message; }
+  results.push({
+    name: '가드 — scoring.md 를 질문으로 주면 거부(exit 2 경로)',
+    ok: guardOk,
+    detail: guardMsg || '거부 안 됨',
+  });
+
+  // 짧은 줄 — 8자 미만 질문 줄은 가림에 안 쓴다
+  const shortQ = scanText('합격 60%', '(q-short)', patterns, questionLines('합격 60%'));
+  results.push({
+    name: `짧은 질문 줄(<${QUESTION_MIN_LINE}자)은 가림에 안 쓴다`,
+    ok: shortQ.length >= 1 && shortQ.every(h => !h.exempt),
+    detail: `${shortQ.length}건 · 면제 ${shortQ.filter(h => h.exempt).length}`,
+  });
+
   let failed = 0;
   for (const r of results) {
     console.log(`${r.ok ? 'PASS' : 'FAIL'}  ${r.name}\n      ${r.detail}`);
@@ -200,13 +373,13 @@ try {
   const args = process.argv.slice(2);
   if (args.includes('--test')) process.exit(selfTest());
 
-  const targets = args.filter(a => !a.startsWith('--'));
+  const patterns = loadPatterns();
+  const { targets, question } = parseArgs(args);
   if (!targets.length) {
-    console.error('usage: hide-check.mjs <조립된 워커 프롬프트 파일>... | --test');
+    console.error('usage: hide-check.mjs [--session <sf-id> | --question <질문 파일>] <조립된 워커 프롬프트 파일>... | --test');
     process.exit(2);
   }
-
-  const patterns = loadPatterns();
+  const qLines = questionLines(question);
 
   // 생존 증명 먼저 — 죽은 검사기의 "0건"을 PASS 로 내보내지 않는다.
   const alive = livenessOrDie(patterns);
@@ -223,16 +396,22 @@ try {
       `[hide-check]    이 패턴들의 "0건"은 생존이 증명되지 않은 0건이다. fixture 에 해당 줄을 추가할 것(--test 는 FAIL).\n`);
   }
 
-  const hits = [];
-  for (const t of targets) hits.push(...scanFile(t, patterns));
+  const all = [];
+  for (const t of targets) all.push(...scanFile(t, patterns, qLines));
+  const hits = all.filter(h => !h.exempt);
+  const exempt = all.filter(h => h.exempt);
+
+  // 면제는 조용히 하지 않는다 — 누출이든 PASS 든 면제 매치를 먼저 다 찍는다.
+  for (const h of exempt) console.log(fmt(h));
+  const exNote = question ? ` · 면제 ${exempt.length}건(질문 원문 구간 · 질문 줄 ${qLines.length}개)` : '';
 
   if (hits.length) {
     for (const h of hits) console.log(fmt(h));
-    console.log(`\n누출 ${hits.length}건 / 대상 ${targets.length}개 — 조립 경로가 리드 전용 층을 밟았다.`);
+    console.log(`\n누출 ${hits.length}건${exNote} / 대상 ${targets.length}개 — 조립 경로가 리드 전용 층을 밟았다.`);
     process.exit(1);
   }
 
-  console.log(`PASS — 누출 0건 (대상 ${targets.length}개 · 패턴 ${patterns.length}개 · 양성 대조 ${alive.length}건 검출로 생존 확인)`);
+  console.log(`PASS — 누출 0건${exNote} (대상 ${targets.length}개 · 패턴 ${patterns.length}개 · 양성 대조 ${alive.length}건 검출로 생존 확인)`);
   process.exit(0);
 } catch (err) {
   if (err instanceof ScriptError) {
