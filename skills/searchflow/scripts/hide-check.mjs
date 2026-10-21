@@ -16,6 +16,8 @@
 //   · 양성 fixture 생존 검사는 가림 없이 원문 그대로 본다.
 //   · 면제는 조용히 하지 않는다 — 매치마다 stdout 에 찍고 PASS 줄에 건수를 적는다.
 //   · 플래그가 없으면 종전과 같은 거동이다.
+//   · 면제는 11개 패턴 전부에 적용된다(숫자층만이 아님) — 질문 줄은 어휘(예: weights)까지 포함해 운영자 입력이기 때문.
+//   · 질문 파일이 검사 대상 자신이면 거부 · `--question=값` 등호형은 거부(조용히 무시 ❌).
 //
 // 금칙 패턴 SoT = references/scoring.md 머리의 `<!-- HIDE-TOKENS: ... -->` 선언부 **한 곳뿐**.
 // 여기에 패턴을 복제하지 않는다 — 이중 관리는 한쪽만 갱신되는 순간 은닉이 조용히 얇아진다.
@@ -161,23 +163,36 @@ function questionFromSession(id) {
 
 /** argv → { test, targets, question }. 값을 받는 플래그의 값이 대상으로 새지 않게 한다. */
 function parseArgs(argv) {
-  const out = { test: false, targets: [], question: null };
+  const out = { test: false, targets: [], question: null, questionPath: null };
   let qSources = 0;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--test') { out.test = true; continue; }
+    if (/^--(question|session)=/.test(a)) {
+      throw new ScriptError(`${a.split('=')[0]} 는 등호형을 받지 않는다 — '${a.split('=')[0]} <값>' 으로 띄어 쓴다`);
+    }
     if (a === '--question' || a === '--session') {
       const v = argv[i + 1];
       if (v === undefined || v.startsWith('--')) throw new ScriptError(`${a} 뒤에 값이 없다`);
       i += 1;
       qSources += 1;
       out.question = a === '--question' ? questionFromFile(v) : questionFromSession(v);
+      if (a === '--question') out.questionPath = v;
       continue;
     }
     if (a.startsWith('--')) continue;   // 종전 거동: 모르는 플래그는 대상에서 뺀다
     out.targets.push(a);
   }
   if (qSources > 1) throw new ScriptError('--question 과 --session 은 하나만 준다');
+  // 질문 원천이 검사 대상 자신이면 그 파일 전체가 가려진다 — 거부.
+  if (out.questionPath) {
+    const rq = realpathSync(out.questionPath);
+    for (const t of out.targets) {
+      let rt = null;
+      try { rt = realpathSync(t); } catch { /* 대상 부재는 scanFile 이 잡는다 */ }
+      if (rt === rq) throw new ScriptError(`질문 파일이 검사 대상과 같다 — ${t} (자기 자신을 면제 원천으로 쓸 수 없다)`);
+    }
+  }
   return out;
 }
 
@@ -331,6 +346,29 @@ function selfTest() {
     name: '양성 대조 — 질문 줄을 끝까지 옮기지 않은 구간은 면제 안 함',
     ok: partial.filter(h => !h.exempt).length >= 1,
     detail: `누출 ${partial.filter(h => !h.exempt).length}건`,
+  });
+
+  // 양성 — 질문 줄 «전체»를 옮긴 뒤 같은 줄에 기준을 덧붙이면, 덧붙인 쪽은 잡힌다(구간 밖)
+  //   insideSpan 을 «줄에 질문이 있으면 전부 면제»로 망가뜨리면 여기서 FAIL 한다(검증자 변이 D2).
+  const qFull = qLines[1];
+  const sameLine = scanText(`질의: ${qFull} 합격선 80%`, '(q-sameline)', patterns, qLines);
+  const slLeak = sameLine.filter(h => !h.exempt).map(h => h.match);
+  const slEx = sameLine.filter(h => h.exempt).map(h => h.match);
+  results.push({
+    name: '양성 대조 — 질문 줄 뒤 같은 줄에 덧붙인 기준(합격선 80%)은 잡고, 질문 구간 60%·80% 만 면제',
+    ok: slLeak.includes('합격선') && slLeak.includes('80%') && slEx.length === 2,
+    detail: `누출 ${slLeak.join(',')} · 면제 ${slEx.join(',')}`,
+  });
+
+  // 양성 — 매치가 질문 구간 경계에 걸치면 면제 아님
+  //   insideSpan 을 «겹치면 면제»로 망가뜨리면 여기서 FAIL 한다(검증자 변이 D2).
+  //   질문 줄이 `…관련8` 로 끝나고 브리프가 `…관련80%` 로 이어지면 `80%` 는 구간에 걸친다.
+  const qEdge = '경계 시험용 질문 줄입니다 관련8';
+  const edge = scanText(`${qEdge}0% 이상`, '(q-edge)', patterns, questionLines(qEdge));
+  results.push({
+    name: '양성 대조 — 질문 구간 경계에 걸친 매치는 면제 안 함',
+    ok: edge.some(h => h.match === '80%' && !h.exempt),
+    detail: edge.map(h => `${h.match}${h.exempt ? '(면제)' : ''}`).join(',') || '0건',
   });
 
   // 생존 — 질문을 줘도 양성 fixture 는 가림 없이 본다
