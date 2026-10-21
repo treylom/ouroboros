@@ -39,6 +39,26 @@ const die = (code, msg) => { process.stderr.write(`[hide-e2e] ${msg}\n`); proces
 const CRITERIA_A = { threshold: 1.6, weights: { ORIGINAL: 1.0, A: 0.75, B: 0.45, C: 0.15, UNREACHABLE: 0 } };
 const CRITERIA_B = { threshold: 2.4, weights: { ORIGINAL: 0.9, A: 0.55, B: 0.35, C: 0.05, UNREACHABLE: 0 } };
 
+// P-1 모호도 게이트 통과 clearance — 서버는 gate 인자 없이 searchflow_start 를 P0 로 들이지 않는다(mcp-server gateCheck).
+// e2e 가 재는 것은 P2 은닉이다. 그래서 게이트는 **약화 없이** 정상 경로로 통과한다: 고정 질문을 4항목 O 로 채점해 낸다.
+// 모양은 mcp-server selfTest 의 통과 표본과 같다. 게이트가 살아 있는지는 아래 음성 대조(gate 없는 start = 거부)로 따로 잰다.
+const GATE_PASS = {
+  verdicts: { goal: 'O', scope: 'O', done: 'O', constraints: 'O' },
+  initial_verdicts: { goal: 'O', scope: 'O', done: 'O', constraints: 'O' },
+  evidence: { goal: '사실 여부 판정이 할 일', scope: '주장 하나로 한정', done: '참/거짓 판정이면 끝', constraints: '현재 시점 판정 · 정답분기 인자 불요' },
+  self_interview_rounds: 0,
+};
+
+/** 도구 응답 본문. 서버가 거부(isError)하면 그 글을 그대로 들고 exit 2 — 검사 자체 실패를 위반(1)으로 섞지 않는다. */
+function toolBody(resp, what) {
+  if (!resp) die(2, `${what}: 응답이 없다`);
+  if (resp.error) die(2, `${what}: 프로토콜 오류 — ${resp.error.message}`);
+  const text = resp.result?.content?.[0]?.text ?? '';
+  if (resp.result?.isError) die(2, `${what}: 서버가 거부했다 — ${text.split('\n')[0]}`);
+  try { return JSON.parse(text); }
+  catch (e) { die(2, `${what}: 응답 본문이 JSON 이 아니다 — ${text.split('\n')[0]}`); }
+}
+
 function rpc(env, msgs) {
   const p = spawnSync('node', [SERVER], {
     input: msgs.map((m) => JSON.stringify(m)).join('\n') + '\n',
@@ -60,12 +80,16 @@ function runSession(criteria, grade) {
   const [listed] = rpc(env, [{ jsonrpc: '2.0', id: 1, method: 'tools/list' }]);
   if (!listed?.result?.tools) die(2, 'tools/list 응답이 비었다 — 말뭉치의 절반이 미측정이다');
 
-  const [started] = rpc(env, [{ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'searchflow_start', arguments: { question: '이 주장이 사실인가' } } }]);
-  const startBody = JSON.parse(started.result.content[0].text);
+  const [started] = rpc(env, [{ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'searchflow_start', arguments: { question: '이 주장이 사실인가', gate: GATE_PASS } } }]);
+  const startBody = toolBody(started, 'searchflow_start');
   const sid = startBody.session_id;
   const briefs = startBody.frames.map((f) => f.worker_brief).filter(Boolean);
 
-  const src = [{ url: 'https://a', grade, status: 'used' }, { url: 'https://b', grade, status: 'used' }];
+  // 반증·신선도 규칙(기본 기준에 들어 있고 스왑 기준에도 그대로 합쳐진다)은 **끄지 않고 충족**시킨다 —
+  // 반대 입장 출처 1개 + 오늘 날짜. 그래야 판정을 가르는 것이 통과선 하나뿐이고, L3-a 가 통과선 스왑만 잰다.
+  const today = new Date().toISOString().slice(0, 10);
+  const src = [{ url: 'https://a', grade, status: 'used', stance: 'support', published: today },
+               { url: 'https://b', grade, status: 'used', stance: 'refute', published: today }];
   const seq = startBody.frames.map((f, i) => ({
     jsonrpc: '2.0', id: 10 + i,
     params: { name: 'searchflow_submit', arguments: { session_id: sid, frame_id: f.frame_id, sources: src } },
@@ -74,7 +98,7 @@ function runSession(criteria, grade) {
   seq.push({ jsonrpc: '2.0', id: 99, method: 'tools/call', params: { name: 'searchflow_gate', arguments: { session_id: sid } } });
   const responses = rpc(env, seq);
   const last = responses[responses.length - 1];
-  const decision = last.error ? `ERROR:${last.error.message}` : JSON.parse(last.result.content[0].text).decision;
+  const decision = toolBody(last, 'searchflow_gate').decision;
 
   // 원장에서 outbound verbatim 만 — 서버 내부 판정(gate 이벤트의 decision 등)은 워커가 못 본다.
   const files = readdirSync(join(dir, 'sessions'));
@@ -204,6 +228,19 @@ function main() {
       '     그 기억이 오염원이라 증거가 되지 않는다. 그래서 이 스크립트가 재는 것은 "값·규칙 문자열이\n' +
       '     말뭉치에 없다"(① 결정적)까지고, **L2 는 맹검 심판 n회 전까지 미측정**이다.\n');
     return 0;
+  }
+
+  // ── P-1 음성 대조: gate 없는 start 는 지금도 거부되는가. 위 세션들이 GATE_PASS 로 통과한 것이
+  //    게이트를 약하게 만든 결과가 아님을 같은 실행 안에서 보인다(거부 안 되면 FAIL).
+  {
+    const dir = mkdtempSync(join(tmpdir(), 'hide-e2e-p1-'));
+    const env = { ...process.env, SEARCHFLOW_CRITERIA: JSON.stringify(CRITERIA_A), SEARCHFLOW_STATE_DIR: dir };
+    const [r] = rpc(env, [{ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'searchflow_start', arguments: { question: '이 주장이 사실인가' } } }]);
+    rmSync(dir, { recursive: true, force: true });
+    const text = r?.result?.content?.[0]?.text ?? '';
+    rec('P-1 음성 대조 — gate 없는 searchflow_start 는 거부된다(게이트 약화 없음)',
+        r?.result?.isError === true && text.includes('P-1'),
+        `isError=${r?.result?.isError === true} · ${text.split('\n')[0].slice(0, 80)}`);
   }
 
   // ── L3: 스왑이 무효면 나머지 검사가 공허하다. 먼저 잰다.
