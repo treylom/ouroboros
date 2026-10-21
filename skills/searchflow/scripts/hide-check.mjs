@@ -3,6 +3,8 @@
 //
 // 계약 (21-implementation-spec §2-6 ABI):
 //   argv   : [--session <sf-id>] <조립된 워커 프롬프트 파일>...  |  --test
+//            (`--test` 는 단독으로만 받는다 — 대상 파일·다른 플래그와 섞으면 exit 2. 섞인 호출이 스캔 없이 0 으로
+//             끝나면 «검사했다»로 읽힌다. 둘 다 돌리면 끝 코드 하나에 두 결과가 섞인다. 그래서 거부한다.)
 //   stdout : 누출 매치 목록 (파일:라인:패턴) · 면제 매치는 `면제(질문 원문)` 꼬리표로 따로 찍는다
 //   exit   : 0=PASS · 1=FAIL(누출 또는 **검사기 사망**) · 2=스크립트 오류(**통과 취급 ❌**)
 //
@@ -164,6 +166,11 @@ function questionFromSession(id) {
   }
   throw new ScriptError(`세션 원장에 start.question 이 없다 — ${p}`);
 }
+
+/** --test 를 대상·다른 플래그와 섞었을 때의 안내(exit 2). 셀프테스트만 돌고 대상은 스캔되지 않던 길을 닫는다. */
+const TEST_MIXED_REFUSED =
+  '--test 는 단독으로만 받는다 — 대상 파일이나 다른 플래그와 섞으면 대상은 스캔되지 않는다. ' +
+  '셀프테스트는 --test 하나로, 대상 검사는 --test 없이 따로 돌린다';
 
 /** 본 경로가 --question 을 받았을 때의 안내(exit 2). */
 const QUESTION_MAIN_REFUSED =
@@ -463,6 +470,15 @@ function selfTest() {
       detail: `exit=${r0.status} ${pl0 || r0.stderr.split('\n')[0]}`,
     });
 
+    // --test 섞인 호출 거부 — 대상 파일과 함께 주면 exit 2(스캔 없이 0 으로 끝나던 길). 음성 짝 = 위 본 경로 시험들.
+    const rt = runSelf(['--test', briefLeak]);
+    const rt2 = runSelf([briefLeak, '--test', '--session', 'sf-selftest1'], { SEARCHFLOW_STATE_DIR: tmp });
+    results.push({
+      name: '--test 를 대상 파일과 섞으면 거부한다(exit 2 · 스캔 없이 0 ❌)',
+      ok: rt.status === 2 && rt.stderr.includes('--test 는 단독으로만') && rt2.status === 2,
+      detail: `exit=${rt.status}/${rt2.status} ${rt.stderr.split('\n')[0]}`,
+    });
+
     // 셀프테스트 경로만 --question 을 받는다 — 받되 자기 자신을 원천으로 주면 거부
     let accepted = false, selfRefused = false;
     try { accepted = parseArgs(['--question', qFile, briefQ], { allowQuestion: true }).question === q; } catch { /* accepted=false */ }
@@ -488,7 +504,10 @@ function selfTest() {
 // ── 본 경로 ─────────────────────────────────────────────────────────────────
 try {
   const args = process.argv.slice(2);
-  if (args.includes('--test')) process.exit(selfTest());
+  if (args.includes('--test')) {
+    if (args.length > 1) throw new ScriptError(TEST_MIXED_REFUSED);
+    process.exit(selfTest());
+  }
 
   const patterns = loadPatterns();
   const { targets, question } = parseArgs(args);
