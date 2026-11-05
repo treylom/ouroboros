@@ -41,6 +41,7 @@ const CRITERIA_B = { threshold: 2.4, weights: { ORIGINAL: 0.9, A: 0.55, B: 0.35,
 
 // P-1 모호도 게이트 통과 clearance — 서버는 gate 인자 없이 searchflow_start 를 P0 로 들이지 않는다(mcp-server gateCheck).
 // e2e 가 재는 것은 P2 은닉이다. 그래서 게이트는 **약화 없이** 정상 경로로 통과한다: 고정 질문을 4항목 O 로 채점해 낸다.
+// 이 e2e 는 사람이 시킨 조사가 아니라 자동 시험이다 — 0.55.12 부터 그런 조사는 origin = bot + 근거 1줄로 밝힌다(사람 지시는 원래 말·시한 근거 필수).
 // 모양은 mcp-server selfTest 의 통과 표본과 같다. 게이트가 살아 있는지는 아래 음성 대조(gate 없는 start = 거부)로 따로 잰다.
 const GATE_PASS = {
   verdicts: { goal: 'O', scope: 'O', done: 'O', constraints: 'O' },
@@ -80,7 +81,7 @@ function runSession(criteria, grade) {
   const [listed] = rpc(env, [{ jsonrpc: '2.0', id: 1, method: 'tools/list' }]);
   if (!listed?.result?.tools) die(2, 'tools/list 응답이 비었다 — 말뭉치의 절반이 미측정이다');
 
-  const [started] = rpc(env, [{ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'searchflow_start', arguments: { question: '이 주장이 사실인가', gate: GATE_PASS } } }]);
+  const [started] = rpc(env, [{ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'searchflow_start', arguments: { question: '이 주장이 사실인가', gate: { ...GATE_PASS, origin: 'bot', origin_reason: '사람이 시키지 않은 은닉 검사용 자동 시험' } } } }]);
   const startBody = toolBody(started, 'searchflow_start');
   const sid = startBody.session_id;
   const briefs = startBody.frames.map((f) => f.worker_brief).filter(Boolean);
