@@ -523,18 +523,29 @@ const GATE_RULES = [
   '④′ 제약 2종 분리 + 판정 순서(상호 참조 0): step 1 — 문면의 제약 후보에 역할 태그(배타 파티션 ❌·한 제약이 두 역할 겸행 가능): (a) 크기 제약(시한·형식·분량 — 독립 감점 ❌·③ 유계 판정의 입력으로만) / (b) 정답분기 제약(기준일·관할·대상 버전·안전 조건 등 — 답 «크기»는 안 바꾸나 «어느 답이 맞는지»를 바꾸는 파라미터). ④ 의 O/X = (b) 기준 단독: 과제 성격상 정답분기 파라미터가 필요한데 문면에 없으면 X — 면제 불가. 판별선 = 암묵 현재/불요(발주 시점 «지금» 상태 조사 — ④(b) 불요 = O) vs 명시 필요(기준시점·관할·버전이 정답을 가르는 과제 — 부재 = X). step 2 — ③ 유계 판정은 ① + ② + ④(a) «문면»만 입력(④ 판정 결과 참조 ❌).',
   '㉮ 지시대명사 세칙: 문면 안에서 선행 지시 대상이 해소되지 않는 지시대명사(「이거·그거·이들」) = ② X 고정 — 수신자가 발주자 머릿속 컨텍스트를 공유한다고 가정하지 않는다(추론 해소 ❌).',
   '내부 미지 구분: 조사로 밝힐 대상의 «내부 미지»(예: 어느 요금제가 있는지)는 게이트 트리거가 아니다 — 발주가 그 미지를 조사 과제로 지정했으면 O.',
-  '원래 말 기준(사람이 시킨 조사 · gate.origin 생략 = human): gate.original_question 에 사람이 처음 한 말을 글자 그대로 넣는다(봇이 다시 쓴 지시문 ❌). 첫 채점 gate.initial_verdicts 는 그 원래 말을 채점한다. 질문(question)이 원래 말과 다르면 운영자 인터뷰가 필수다 — 인터뷰 없이 통과하는 길은 question = original_question 하나뿐. 원래 말이 지시대명사(이거·그거·저것 등)로만 대상을 가리키면 첫 채점 ② = X(㉮ — 서버가 원래 말에서 직접 검사). 사람이 시키지 않은 봇 자체 조사만 gate.origin = bot + gate.origin_reason(근거 1줄)로 면제된다.',
-  '마감 시한: 사람이 시킨 조사에서 시한을 사람이 안 정했으면(deadline_source = default) 기본값으로 넘기지 않는다 — 같은 운영자 인터뷰(⑤ 마감 시한)에서 함께 묻고 deadline_source = operator 로 낸다. 인터뷰 없이 operator 로 내려면 원래 말 속 시한 구절을 deadline_quote 에 글자 그대로 넣는다(봇·상위 지시가 정한 시한은 operator 가 아니다).',
-  '자동 모드: 원래 말에 «자동 모드»가 있거나 운영자가 인터뷰에서 «자동 모드»를 고르면, 남은 인터뷰 질문은 봇이 스스로 답을 채워 인터뷰 모호도가 통과선 아래로 내려갈 때까지 이어 가고(인터뷰 완료 검사는 그대로), 시한은 기본값을 써도 된다. 봇이 쓴 question 에 적힌 «자동 모드»는 근거가 아니다.',
+  '원래 말 기준(사람이 시킨 조사 · gate.origin 생략 = human): gate.original_question 에 사람이 처음 한 말을 글자 그대로 넣는다(봇이 다시 쓴 지시문 ❌). 첫 채점 gate.initial_verdicts 는 그 원래 말을 채점한다. 질문(question)이 원래 말과 다르면 운영자 인터뷰가 필수다 — 인터뷰 없이 통과하는 길은 question = original_question 하나뿐. 원래 말에 지시대명사(이거·그거·이걸·이들 등)가 있으면 첫 채점 ② = X(㉮ — 서버가 원래 말에서 직접 검사 · 선행 대상이 문면에 있는지는 서버가 못 가려 보수적으로 거부한다 — 비용은 운영자 질문 1회). 사람이 시키지 않은 봇 자체 조사만 gate.origin = bot + gate.origin_reason(근거 1줄)로 면제된다.',
+  '마감 시한: 사람이 시킨 조사에서 시한을 사람이 안 정했으면(deadline_source = default) 기본값으로 넘기지 않는다 — 같은 운영자 인터뷰(⑤ 마감 시한)에서 함께 묻고 deadline_source = operator 로 낸다. 인터뷰 없이 operator 로 내려면 원래 말 속 시한 구절(«까지·마감·오늘·N시» 같은 시한 낱말이 든 짧은 구절)을 deadline_quote 에 글자 그대로 넣는다(봇·상위 지시가 정한 시한은 operator 가 아니다).',
+  '자동 모드: 원래 말에 «자동 모드»가 있거나 운영자가 인터뷰에서 «자동 모드»를 고르면, 남은 인터뷰 질문은 봇이 스스로 답을 채워 인터뷰 모호도가 통과선 아래로 내려갈 때까지 이어 가고(인터뷰 완료 검사는 그대로), 시한은 기본값을 써도 되고 시한 인용(deadline_quote)도 요구하지 않는다. 봇이 쓴 question 에 적힌 «자동 모드»는 근거가 아니고, «자동 모드 말고·쓰지 마»처럼 바로 뒤가 부정이면 세지 않는다.',
   '통과 = 4항목 전부 O(점수 = 명확도, 높을수록 명확). 하나라도 X = 조사 시작 ❌ — 지금 ouroboros_interview 를 시작해(' + INTERVIEW_CONTEXT_HOW + ') 인터뷰가 낸 질문을 운영자에게 하나도 빠짐없이 그대로 전달한다(창구 사다리 SKILL.md §4 · 대기 시간 상한 없음 · 봇이 대신 답하지 않는다). 인터뷰가 완료되면 다듬은 질문을 다시 채점하고 gate.operator_clarification(interview_session_id 포함)을 함께 제출한다. 첫 채점 gate.initial_verdicts 는 언제나 함께 낸다.',
   INTERVIEW_FRAME,
 ].join('\n');
 
 // ㉮ 지시대명사 — 원래 말(사람 글)에서만 본다. 앞 글자가 한글이면 낱말 가운데(«사과이거나»)라 세지 않는다.
 // 문면 안 선행 대상 해소 여부는 서버가 못 가린다 — 오검출 비용은 운영자 질문 1회라 보수적으로 잡는다.
-const DEICTIC_RE = /(?<![가-힣])(?:이거|그거|저거|요거|이것|그것|저것|이건|그건|저건|이게|그게|저게|이걸|그걸|저걸)/;
-// 자동 모드 표지 — 사람 글(원래 말 · 인터뷰 운영자 답)에서만 근거로 센다.
-const AUTO_MODE_RE = /자동\s*모드|auto[\s_-]*mode/i;
+const DEICTIC_RE = /(?<![가-힣])(?:이거|그거|저거|요거|이것|그것|저것|이건|그건|저건|이게|그게|저게|이걸|그걸|저걸|이들)/;
+// 자동 모드 표지 — 사람 글(원래 말 · 인터뷰 운영자 답)에서만 근거로 센다. 바로 뒤가 부정(«말고·쓰지 마·아니» 등)이면 세지 않는다.
+const AUTO_MODE_RE = /자동\s*모드|auto[\s_-]*mode/gi;
+const AUTO_NEG_RE = /^\s*(?:는|은|로|으로|를|을)?\s*(?:말고|아니|안\s|쓰지|하지\s*마|하지\s*말|싫|없이|빼고|금지|no\b|off\b)/i;
+function saysAutoMode(text) {
+  for (const m of String(text).matchAll(AUTO_MODE_RE))
+    if (!AUTO_NEG_RE.test(String(text).slice(m.index + m[0].length, m.index + m[0].length + 12))) return true;
+  return false;
+}
+// 시한 구절 모양 — 원래 말에 «있기만» 한 아무 조각(한 글자 · 연도 숫자 · 원래 말 전체)을 시한 근거로 받지 않는다.
+const DEADLINE_SHAPE_RE = /까지|마감|시한|오늘|내일|모레|자정|정오|오전|오후|요일|이번\s*주|다음\s*주|\d+\s*시|\d{1,2}:\d{2}|\d+\s*분\s*(?:안|내|뒤|후)|until|by\s|deadline|today|tomorrow|tonight|\bEOD\b|\d\s*(?:am|pm)\b/i;
+const DEADLINE_QUOTE_MAX = 40;
+// 여러 줄 판정 = 줄을 나누는 글자 전부(32c 의 줄 나눔 셈과 같은 집합).
+const LINE_BREAK_RE = /[\r\n\u000b\u000c\u001c-\u001e\u0085\u2028\u2029]/;
 
 function gateCheck(gate, question, deadlineSource = 'default', deadlineQuote) {
   if (!gate || typeof gate !== 'object') {
@@ -563,7 +574,7 @@ function gateCheck(gate, question, deadlineSource = 'default', deadlineQuote) {
   let originReason;
   if (origin === 'bot') {
     originReason = typeof gate.origin_reason === 'string' ? gate.origin_reason.trim() : '';
-    if (!originReason || /[\r\n\u2028\u2029\u0085]/.test(originReason))
+    if (!originReason || LINE_BREAK_RE.test(originReason))
       throw new Error('gate.origin = bot 면제에는 gate.origin_reason(사람이 시키지 않은 이유 1줄)이 필요하다 — 비었거나 여러 줄이면 받지 않는다. 사람이 시킨 조사면 origin 을 빼고 gate.original_question 에 사람의 원래 말을 넣어라.');
   }
   const oqRaw = typeof gate.original_question === 'string' ? gate.original_question.trim() : '';
@@ -622,7 +633,7 @@ function gateCheck(gate, question, deadlineSource = 'default', deadlineQuote) {
     // 적은 긴 원질문의 뒷부분이 표지 글자로 이어질 때 짧은 다른 원질문의 인터뷰로 통과했다(3차 보안 F·G·H / T3).
     checkInterviewContext(iv, oq || String(question).trim());
     const autoAnswer = (Array.isArray(iv.rounds) ? iv.rounds : [])
-      .some((r) => r && typeof r.user_response === 'string' && AUTO_MODE_RE.test(r.user_response));
+      .some((r) => r && typeof r.user_response === 'string' && saysAutoMode(r.user_response));
     interview = { ambiguity_score: iv.ambiguity_score, answered_rounds: answered, status: iv.status, auto_answer: autoAnswer };
   }
   // 거부 글에 원래 말로 연 인터뷰 시작 글을 함께 준다 — «근거가 필요하다»만 주면 호출자가 인터뷰를 어떻게 열지 몰라 멈춘다.
@@ -634,7 +645,7 @@ function gateCheck(gate, question, deadlineSource = 'default', deadlineQuote) {
     );
   // 자동 모드 근거 = 사람 글뿐: 원래 말 또는 인터뷰의 운영자 답. 봇이 쓴 question 은 근거가 아니다.
   let autoBasis;
-  if (oq && AUTO_MODE_RE.test(oq)) autoBasis = 'original_question';
+  if (oq && saysAutoMode(oq)) autoBasis = 'original_question';
   else if (interview?.auto_answer) autoBasis = 'interview';
   if (gate.auto_mode === true && !autoBasis)
     throw new Error('gate.auto_mode 근거 없음 — 자동 모드는 사람의 원래 말(original_question)에 «자동 모드»가 있거나 운영자가 인터뷰에서 «자동 모드»라고 답했을 때만 켜진다. 봇이 쓴 질문의 «자동 모드»는 근거가 아니다.');
@@ -653,9 +664,9 @@ function gateCheck(gate, question, deadlineSource = 'default', deadlineQuote) {
   let dq;
   if (origin === 'human' && deadlineSource === 'operator' && !ocOut && !autoBasis) {
     dq = typeof deadlineQuote === 'string' ? deadlineQuote.trim() : '';
-    if (!dq || !oq.includes(dq))
+    if (!dq || !oq.includes(dq) || dq.length > DEADLINE_QUOTE_MAX || !DEADLINE_SHAPE_RE.test(dq))
       throw new Error(
-        'P-1 게이트: deadline_source = operator 인데 시한을 사람이 정한 근거가 없다 — 운영자 인터뷰도 없고, 원래 말 속 시한 구절 인용(deadline_quote)도 ' + (dq ? '원래 말에 없는 글이다' : '없다') + '. 원래 말에 시한이 있으면 그 구절을 deadline_quote 에 글자 그대로 넣고, 없으면 지금 ouroboros_interview 를 시작해 ⑤ 마감 시한을 운영자에게 묻는다(봇·상위 지시가 정한 시한은 operator 가 아니다).\n' +
+        'P-1 게이트: deadline_source = operator 인데 시한을 사람이 정한 근거가 없다 — 운영자 인터뷰도 없고, 원래 말 속 시한 구절 인용(deadline_quote)도 ' + (!dq ? '없다' : (!oq.includes(dq) ? '원래 말에 없는 글이다' : `시한 구절이 아니다(«까지·마감·오늘·N시» 같은 시한 낱말이 든 ${DEADLINE_QUOTE_MAX}자 이하 구절)`)) + '. 원래 말에 시한이 있으면 그 구절을 deadline_quote 에 글자 그대로 넣고, 없으면 지금 ouroboros_interview 를 시작해 ⑤ 마감 시한을 운영자에게 묻는다(봇·상위 지시가 정한 시한은 operator 가 아니다).\n' +
         `ouroboros_interview 의 initial_context 에는 아래 ${CTX_BEGIN} 와 ${CTX_END} 사이 글을 한 글자도 바꾸지 말고 그대로 넣는다.\n` +
         `${interviewContextBlock(oq)}\n${GATE_RULES}`,
       );
@@ -1556,7 +1567,7 @@ function selfTest() {
     const m33 = rej({ question: OQ_CLEAR, salt: 't33a', gate: G4 });
     const m33b = rej({ question: OQ_CLEAR, salt: 't33b', gate: { ...G4, origin: 'robot' } });
     ok('원래 말: 사람이 시킨 조사(origin 생략)에 original_question 없음 = 거부 · origin 허용값 밖 = 거부',
-       m33.includes('original_question') && m33.includes('원래 말') && m33b.includes('origin'),
+       m33.includes('사람의 원래 말이 필요하다') && m33b.includes('gate.origin 값 위반'),
        `${m33.slice(0, 50)} | ${m33b.slice(0, 40)}`);
 
     // 34 원래 말이 지시대명사로만 대상을 가리키는데 첫 채점 ② = O = 거부 + 인터뷰 블록(원래 말 기준) · 음성 미끼: «이거나»류 = 오검출 ❌
@@ -1565,19 +1576,21 @@ function selfTest() {
     const m34r = rej({ question: '국내 전기차 판매 상위 다섯 브랜드 공식 통계 비교', salt: 't34b', gate: { ...G4, original_question: OQ_DEICTIC } });
     const OQ_NOTDEICTIC = '사과이거나 배인 과일 중 2026-11-01 기준 가락시장 경락가가 더 비싼 쪽을 공식 통계로 알려 주세요. 오늘 18시까지.';
     const m34n = rej({ question: OQ_NOTDEICTIC, salt: 't34c', deadline_quote: '오늘 18시까지', gate: { ...G4, original_question: OQ_NOTDEICTIC } });
+    const m34d = rej({ question: '이들 자료 비교해 줘', salt: 't34d', gate: { ...G4, original_question: '이들 자료 비교해 줘' } });
     ok('원래 말 기준 채점: «그거 조사해 줘» + 첫 채점 4항목 O = 거부 + 원래 말로 인터뷰 블록(다시 쓴 질문으로 내도 같음) · «…이거나…» = 통과',
-       m34.includes('지시대명사') && m34.includes(interviewContextBlock(OQ_DEICTIC)) &&
-       m34r.includes('지시대명사') && m34r.includes(interviewContextBlock(OQ_DEICTIC)) && m34n === '',
-       `deictic=${m34 ? m34.slice(0, 40) : 'PASS'} rewritten=${m34r ? 'rej' : 'PASS'} notdeictic=${m34n ? m34n.slice(0, 40) : 'PASS'}`);
+       m34.includes('원래 말에 지시대명사(«') && m34.includes(interviewContextBlock(OQ_DEICTIC)) &&
+       m34r.includes('원래 말에 지시대명사(«') && m34r.includes(interviewContextBlock(OQ_DEICTIC)) && m34n === '' && m34d.includes('원래 말에 지시대명사(«이들»'),
+       `deictic=${m34 ? m34.slice(0, 40) : 'PASS'} rewritten=${m34r ? 'rej' : 'PASS'} notdeictic=${m34n ? m34n.slice(0, 40) : 'PASS'} ideul=${m34d ? m34d.slice(0, 30) : 'PASS'}`);
 
     // 35 봇 자체 조사 면제 = origin bot + 근거 1줄 · 근거 없음/빈칸/여러 줄 = 거부 · 근거 있으면 원래 말·시한 없이 통과
     const m35a = rej({ question: '정기 점검 질문', salt: 't35a', deadline_source: 'default', gate: { ...G4, origin: 'bot' } });
     const m35b = rej({ question: '정기 점검 질문', salt: 't35b', deadline_source: 'default', gate: { ...G4, origin: 'bot', origin_reason: '   ' } });
     const m35c = rej({ question: '정기 점검 질문', salt: 't35c', deadline_source: 'default', gate: { ...G4, origin: 'bot', origin_reason: '첫 줄\n둘째 줄' } });
+    const m35v = ['첫 줄\u000b둘째', '첫 줄\u000c둘째', '첫 줄\u001e둘째'].map((r, i) => rej({ question: '정기 점검 질문', salt: `t35v${i}`, deadline_source: 'default', gate: { ...G4, origin: 'bot', origin_reason: r } }));
     const s35 = okStart({ question: '정기 점검 질문', salt: 't35d', gate: { ...G4, origin: 'bot', origin_reason: '매일 아침 점검이 스스로 연 조사' } });
     const p35 = p1Of(s35);
     ok('봇 자체 조사: origin bot 근거 없음·빈칸·여러 줄 = 거부 · 근거 1줄 = 통과(원장 origin·origin_reason 기록)',
-       m35a.includes('origin_reason') && m35b.includes('origin_reason') && m35c.includes('origin_reason') &&
+       m35a.includes('origin_reason') && m35b.includes('origin_reason') && m35c.includes('origin_reason') && m35v.every((m) => m.includes('origin_reason')) &&
        p35?.origin === 'bot' && p35?.origin_reason === '매일 아침 점검이 스스로 연 조사',
        `a=${m35a ? 'rej' : 'PASS'} b=${m35b ? 'rej' : 'PASS'} c=${m35c ? 'rej' : 'PASS'} ok=${s35?.err ?? 'PASS'}`);
 
@@ -1601,7 +1614,7 @@ function selfTest() {
        !!s37?.session_id && p37?.original_question === OQ_CLEAR && p37?.origin === 'human' && m37r.includes('운영자 인터뷰 근거') && m37r.includes(interviewContextBlock(OQ_CLEAR)),
        `start=${s37?.err ?? 'PASS'} rewritten=${m37r ? m37r.slice(0, 40) : 'PASS'}`);
 
-    // 38 자동 모드(재경 지시 2026-11-06): 원래 말에 «자동 모드» = 시한 기본값 허용 · 봇 글(question)에만 있으면 근거 ❌ ·
+    // 38 자동 모드(운영자 지시 2026-11-06): 원래 말에 «자동 모드» = 시한 기본값 허용 · 봇 글(question)에만 있으면 근거 ❌ ·
     //     auto_mode 신고만 = 거부 · 인터뷰에서 운영자가 «자동 모드»를 고름 = 시한 기본값 허용
     const OQ_AUTO = '2026년 국내 전기차 판매 상위 다섯 브랜드를 공식 통계로 비교해 줘. 자동 모드로.';
     const s38a = okStart({ question: OQ_AUTO, salt: 't38a', deadline_source: 'default', gate: { ...G4, original_question: OQ_AUTO } });
@@ -1611,6 +1624,12 @@ function selfTest() {
     const m38b = rej({ question: '다듬은 시세 질문 (자동 모드)', salt: 't38b', deadline_source: 'default',
       gate: { ...G4, initial_verdicts: IV_X, original_question: '요즘 시세 알아봐 줘', operator_clarification: { ...oc23, interview_session_id: IV_DL } } });
     const m38c = rej({ question: OQ_NOAUTO, salt: 't38c', deadline_source: 'default', gate: { ...G4, original_question: OQ_NOAUTO, auto_mode: true } });
+    const m38n = rej({ question: '2026년 국내 전기차 판매 상위 다섯 브랜드를 공식 통계로 비교해 줘. 자동 모드 쓰지 마.', salt: 't38n', deadline_source: 'default',
+      gate: { ...G4, original_question: '2026년 국내 전기차 판매 상위 다섯 브랜드를 공식 통계로 비교해 줘. 자동 모드 쓰지 마.' } });
+    const IV_NEG = 'interview_ffff000000000003';
+    mkIv(IV_NEG, { status: 'completed', score: 0.15, answers: 1, resp: '자동 모드 말고 직접 답할게요', ctx: interviewContextFor('요즘 시세 알아봐 줘') });
+    const m38m = rej({ question: '다듬은 시세 질문', salt: 't38m', deadline_source: 'default',
+      gate: { ...G4, initial_verdicts: IV_X, original_question: '요즘 시세 알아봐 줘', operator_clarification: { ...oc23, interview_session_id: IV_NEG } } });
     const IV_AUTO = 'interview_ffff000000000002';
     mkIv(IV_AUTO, { status: 'completed', score: 0.15, answers: 1, resp: '자동 모드로 해 주세요', ctx: interviewContextFor('요즘 시세 알아봐 줘') });
     const s38d = okStart({ question: '다듬은 시세 질문', salt: 't38d', deadline_source: 'default',
@@ -1618,7 +1637,7 @@ function selfTest() {
     const p38d = p1Of(s38d);
     ok('자동 모드: 원래 말에 있음 = 시한 default 통과(auto_basis original_question) · 봇 질문에만 있음/신고만 = 거부 · 인터뷰에서 고름 = 통과(auto_basis interview)',
        p38a?.auto_mode === true && p38a?.auto_basis === 'original_question' &&
-       m38b.includes('마감 시한') && m38c.includes('auto_mode') &&
+       m38b.includes('마감 시한') && m38c.includes('auto_mode') && m38n.includes('마감 시한') && m38m.includes('마감 시한') &&
        p38d?.auto_mode === true && p38d?.auto_basis === 'interview',
        `orig=${s38a?.err ?? 'PASS'} botq=${m38b ? 'rej' : 'PASS'} flag=${m38c ? 'rej' : 'PASS'} iv=${s38d?.err ?? 'PASS'}`);
 
@@ -1627,9 +1646,11 @@ function selfTest() {
     const m40a = rej({ question: OQ_CLEAR, salt: 't40a', deadline_source: 'operator', gate: G_H });
     const m40b = rej({ question: OQ_CLEAR, salt: 't40b', deadline_source: 'operator', deadline_quote: '내일 9시까지', gate: G_H });
     const m40c = rej({ question: OQ_CLEAR, salt: 't40c', deadline_source: 'operator', deadline_quote: '   ', gate: G_H });
+    // 원래 말에 «있기만» 한 아무 조각(한 글자 · 시한 아닌 숫자 · 원래 말 전체) = 시한 구절이 아니다 → 거부
+    const m40s = ['시', '2026', OQ_CLEAR].map((dq, i) => rej({ question: OQ_CLEAR, salt: `t40s${i}`, deadline_source: 'operator', deadline_quote: dq, gate: G_H }));
     ok('마감 시한 근거: operator 신고만(인터뷰·원래 말 인용 없음) = 거부 + 인터뷰 블록 · 원래 말에 없는 인용·빈 인용 = 거부',
-       m40a.includes('deadline_quote') && m40a.includes(interviewContextBlock(OQ_CLEAR)) && m40b.includes('deadline_quote') && m40c.includes('deadline_quote'),
-       `${m40a ? m40a.slice(0, 40) : 'PASS'} | notin=${m40b ? 'rej' : 'PASS'} | blank=${m40c ? 'rej' : 'PASS'}`);
+       m40a.includes('deadline_quote') && m40a.includes(interviewContextBlock(OQ_CLEAR)) && m40b.includes('deadline_quote') && m40c.includes('deadline_quote') && m40s.every((m) => m.includes('deadline_quote')),
+       `${m40a ? m40a.slice(0, 40) : 'PASS'} | notin=${m40b ? 'rej' : 'PASS'} | blank=${m40c ? 'rej' : 'PASS'} | shape=${m40s.map((m) => (m ? 'rej' : 'PASS')).join(',')}`);
 
     // 39 인터뷰 지시문·게이트 규칙·도구 설명이 새 장치를 싣는다(SKILL 을 안 읽는 호스트도 같은 지시)
     const desc39 = JSON.stringify(TOOLS.find((t) => t.name === 'searchflow_start').inputSchema);
