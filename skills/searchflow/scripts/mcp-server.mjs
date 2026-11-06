@@ -305,12 +305,14 @@ function assertNoLeak(payload) {
 // 인터뷰를 검색 질문으로만 묶는다: 우로보로스 인터뷰는 원래 «무엇을 만들지»를 묻는 도구라 그대로 두면
 // 산출물 형식·게시처까지 묻는다. 빈 칸은 한 번에 묶어 묻고 보기를 붙여 회차 수를 줄인다.
 const INTERVIEW_FRAME_MARK = '[검색 인터뷰 지시]';
+// 자동 모드 칸 — 인터뷰가 맨 처음 이 한 줄만 따로 묻는다. 서버는 질문 글이 이 줄과 같은 회차의 «예» 답만 자동 모드 근거로 본다(autoSlotAnswer).
+const AUTO_SLOT_LINE = '[자동 모드 칸] 자동 모드로 할까요? 예/아니오 — ‘예’면 남은 칸은 제가 알아서 채워 조사합니다.';
 const INTERVIEW_FRAME =
   '[검색 인터뷰 지시] 위 원질문은 조사(검색) 질문이다. 이 인터뷰는 «무엇을 찾을지»만 좁힌다 — 무엇을 만들지는 묻지 않는다.\n' +
   '- 물을 칸은 다섯뿐: ① 찾을 것(무엇을 알아내려는가) ② 범위(대상·기간·지역·뺄 것) ③ 검색 끝 기준(몇 개·어떤 비교 축이 나오면 조사가 끝인가) ④ 기준일(언제 기준의 사실인가) ⑤ 마감 시한(조사를 언제까지 끝내야 하는가 — 원질문에 시한이 없으면 다른 빈 칸과 같은 메시지에서 묻는다).\n' +
   '- 조사 결과를 어디에 어떻게 쓸지(영상·글·발표의 길이, 게시처, 화면 구성, 디자인)는 묻지 않는다. 운영자가 먼저 말하면 범위를 정하는 데만 쓰고 되묻지 않는다.\n' +
   '- 비어 있는 칸을 한 메시지에 묶어 한 번에 묻는다(한 칸씩 여러 번 묻지 않는다). 칸마다 고를 수 있는 구체적인 보기 2~3개를 붙인다.\n' +
-  '- 첫 질문 끝에 한 줄을 붙인다: «‘자동 모드’라고 답하시면 남은 칸은 제가 알아서 채워 조사합니다.» 운영자가 자동 모드를 고르면 남은 칸은 묻지 않고 봇이 채운다.\n' +
+  '- 맨 처음에 자동 모드 칸을 따로 한 질문으로 묻는다 — 질문 글은 다음 한 줄 그대로(앞뒤에 다른 말을 붙이지 않는다): «' + AUTO_SLOT_LINE + '» 운영자가 «예»라고 답하면 남은 칸은 묻지 않고 봇이 채우며, 봇이 채운 답(끝의 «이대로 맞나요?» 확인 답 포함)은 머리에 [from-auto] 를 붙인다. «아니오»나 다른 답이면 아래처럼 빈 칸을 묶어 묻는다.\n' +
   '- 다섯 칸이 다 차면 새 칸을 열지 않는다. 채운 다섯 칸을 한 줄로 요약해 «이대로 맞나요?» 확인 질문 하나만 한다.';
 const CTX_BEGIN = '<<<INTERVIEW_INITIAL_CONTEXT';
 const CTX_END = 'INTERVIEW_INITIAL_CONTEXT>>>';
@@ -359,7 +361,7 @@ const TOOLS = [
             origin: { type: 'string', enum: ['human', 'bot'], description: 'Who asked for this research. Omitted means human. human = a person asked (their own words go in original_question). bot = the bot started it on its own with no person asking (a schedule, a self-check); requires origin_reason.' },
             origin_reason: { type: 'string', description: 'Required when origin is bot: one line saying why no person asked for this research. Empty or multi-line is refused.' },
             original_question: { type: 'string', description: 'Required when origin is human (the default): the person\'s own words, verbatim, as first received — not your rewrite. Grade initial_verdicts on these words. If question differs from these words, the operator interview is required.' },
-            auto_mode: { type: 'boolean', description: 'Optional. Auto mode lets the bot answer the remaining interview items itself until the interview is clear enough, and allows the default deadline. The server grants it only when a person\'s own words contain one request sentence that is itself the request: for the operator\'s interview answers, the last operator round (rounds the host filled are recorded with a [from-auto] prefix and skipped) must be a request such as «자동 모드», «자동 모드로 해 주세요» or «auto mode please»; for original_question, the last sentence must be such a request («자동 모드로 해 줘», «자동 모드로 안 묻고 진행해»; not a bare «자동 모드», «자동 모드요» or «나머지는 자동 모드로»), not a question, with no other mention of a mode before it, no list fragment such as «냉방. 제습.», no quote or list marker anywhere (>, &gt;, a colon, an opening quote mark, a line starting with -, • or 1., three or more lines) and no quote cue before it («다음과 같다», «이렇게», «라고», «문구», «명령», «번역», «following», «translate»). A deadline («내일까지», «by Friday», «마감») in original_question turns off both bases; one in the operator rounds turns off the interview basis; that deadline goes in deadline_quote. A topic or extra words inside the request sentence («세탁기를 자동 모드로 해 줘», «자동 모드 쓰지 마») do not count; earlier sentences are not read for refusals (the last word wins). Sending true without that basis is refused.' },
+            auto_mode: { type: 'boolean', description: 'Optional. Auto mode lets the bot answer the remaining interview items itself (prefixing those answers with [from-auto]) until the interview is clear enough, and allows the default deadline. The server grants it only from the interview\'s auto-mode slot: a round whose question is exactly the slot line of the interview frame («[자동 모드 칸] 자동 모드로 할까요? 예/아니오 …», asked on its own) answered by the operator with one yes word (예, 네, 넵, 응, yes), with no later operator answer. Words in original_question or question («자동 모드로 해 줘») never count; the server asks through the interview instead. A deadline in original_question or in the operator\'s answers turns it off; that deadline goes in the interview\'s deadline item or in deadline_quote. Sending true without that basis is refused.' },
             initial_verdicts: {
               type: 'object',
               description: 'Required. The first grading, before any operator interview (same as verdicts when the question was clear from the start). Any X here means the operator interview was required.',
@@ -525,7 +527,7 @@ const GATE_RULES = [
   '내부 미지 구분: 조사로 밝힐 대상의 «내부 미지»(예: 어느 요금제가 있는지)는 게이트 트리거가 아니다 — 발주가 그 미지를 조사 과제로 지정했으면 O.',
   '원래 말 기준(사람이 시킨 조사 · gate.origin 생략 = human): gate.original_question 에 사람이 처음 한 말을 글자 그대로 넣는다(봇이 다시 쓴 지시문 ❌). 첫 채점 gate.initial_verdicts 는 그 원래 말을 채점한다. 질문(question)이 원래 말과 다르면 운영자 인터뷰가 필수다 — 인터뷰 없이 통과하는 길은 question = original_question 하나뿐. 원래 말에 지시대명사(이거·그거·이걸·이들 등)가 있으면 첫 채점 ② = X(㉮ — 서버가 원래 말에서 직접 검사 · 선행 대상이 문면에 있는지는 서버가 못 가려 보수적으로 거부한다 — 비용은 운영자 질문 1회). 사람이 시키지 않은 봇 자체 조사만 gate.origin = bot + gate.origin_reason(근거 1줄)로 면제된다.',
   '마감 시한: 사람이 시킨 조사에서 시한을 사람이 안 정했으면(deadline_source = default) 기본값으로 넘기지 않는다 — 같은 운영자 인터뷰(⑤ 마감 시한)에서 함께 묻고 deadline_source = operator 로 낸다. 인터뷰 없이 operator 로 내려면 원래 말 속 시한 구절을 deadline_quote 에 글자 그대로 넣는다 — 40자 이하이고 인용 전체가 시한 꼴 하나 또는 «날짜/날 + 때 + 시각 + 표지» 순서로 이은 것이어야 한다(«11월 10일 오후 6시까지»·«오늘 18시까지»·«내일 아침»·«3일 안에»·«11월 10일 전에»·«11/10»·«이번 주 금요일»·«이번 달 말»·«by Friday»·«ASAP»). «까지»·«오후»·«요일»·«오늘» 같은 조각 단독, 시한 꼴을 품은 문장 통째, 원래 말에서 숫자·영문 낱말 가운데를 자른 인용(«3시리즈»의 «3시»·«nearby»의 «by»), 앞이 연도(작년·26년 포함)이고 «까지·전» 표지가 없는 날짜, 뒤가 «기준·현재»인 날짜, 바로 뒤가 꾸미는 말인 구절(«3일 안에 배송되는»), 바로 앞이 숫자 뒤 «~·-»인 구절, «까지·until» 구절인데 같은 절 앞에 «부터·에서·이후·from»이 있는 구절(«지금부터»도 기간 시작)은 받지 않는다(봇·상위 지시가 정한 시한은 operator 가 아니다).',
-  '자동 모드: 원래 말이나 인터뷰의 운영자 답이 «자동 모드»를 요청 꼴로 고르면(아래 켜는 조건), 남은 인터뷰 질문은 봇이 스스로 답을 채워 인터뷰 모호도가 통과선 아래로 내려갈 때까지 이어 가고(인터뷰 완료 검사는 그대로), 시한은 기본값을 써도 되고 시한 인용(deadline_quote)도 요구하지 않는다. 봇이 쓴 question 에 적힌 «자동 모드»는 근거가 아니다. 켜는 조건(0.55.13 좁힌 판): 사람 글 속 «요청 꼴 문장 하나 그 자체»만 센다 — 요청 꼴 = [네·그냥] + «자동 모드»(«자동모드»·«오토 모드») + [로·(인터뷰 답만) 요] + [안 묻고·묻지 말고·질문 없이·끝까지] + [해·진행·돌려·가·부탁 꼴] · 영문 «auto mode please»·«use auto mode». 인터뷰 답 = 봇이 채운 [from-auto] 회차를 뺀 마지막 운영자 회차 전체가 요청 꼴(맨 «자동 모드»·«나머지는 자동 모드로»도 됨 — 뒤에 운영자 다른 답이 오면 끔). 원래 말 = 마지막 문장(맺음말 «부탁해요.»만 건너뜀) 전체가 요청 꼴(맨 «자동 모드»·«나머지는 …» = 끔)이고 물음표로 끝나지 않고, 앞 글에 «자동 모드»·다른 «…모드»·술어 없는 짧은 토막(«냉방. 제습.»)이 없고, 글에 인용·목록 표지(«>»·콜론·여는 따옴표·줄 머리 «-»·«1.»·세 줄 이상)나 앞 문장에 인용 머리 낱말(«다음과 같다»·«이렇게»·«라고»·«문구»·«명령»·«번역»)이 없을 때(«자동 모드요.» = 끔). 시한(마감·시한·납기 낱말이나 «내일까지»·«by Friday» 같은 시한 꼴)을 원래 말이 말하면 원래 말·인터뷰 근거 둘 다, 운영자 회차가 말하면 인터뷰 근거를 끈다 — 그 시한은 deadline_quote 로 낸다. 앞 문장의 거절·유보는 보지 않는다(마지막 말이 이긴다). 자동 모드로 봇이 채운 인터뷰 답은 머리에 [from-auto] 를 붙여 기록한다.',
+  '자동 모드: 인터뷰의 자동 모드 칸(인터뷰 지시문의 «' + AUTO_SLOT_LINE + '» 한 줄을 그대로 혼자 묻는 회차)에 운영자가 «예»(네·넵·응·yes 한 낱말)라고 답했을 때만 켠다 — 그러면 남은 인터뷰 질문은 봇이 답을 채워(답 머리에 [from-auto]) 인터뷰 모호도가 통과선 아래로 내려갈 때까지 이어 가고(인터뷰 완료 검사는 그대로), 시한은 기본값을 써도 되고 시한 인용(deadline_quote)도 요구하지 않는다. 원래 말·봇이 쓴 question 속 «자동 모드»는 근거가 아니다(원래 말에 «자동 모드로 해 줘»라고 써도 서버는 인터뷰로 묻는다). 끔: 칸 회차가 없거나 질문 글이 바뀜(앞뒤에 다른 말) · 답이 «예» 한 낱말이 아님(«자동 모드로»·«예, 범위는 국내만»도 끔) · 답 머리가 [from-…] · 칸 뒤에 운영자 답 회차가 더 있음 · 원래 말이나 운영자 답이 시한(마감·시한·납기 낱말이나 «내일까지»·«by Friday» 같은 시한 꼴)을 말함 — 그 시한은 인터뷰 ⑤ 칸이나 deadline_quote 로 낸다. 칸을 여러 번 물었으면 마지막 칸 답이 이긴다.',
   '통과 = 4항목 전부 O(점수 = 명확도, 높을수록 명확). 하나라도 X = 조사 시작 ❌ — 지금 ouroboros_interview 를 시작해(' + INTERVIEW_CONTEXT_HOW + ') 인터뷰가 낸 질문을 운영자에게 하나도 빠짐없이 그대로 전달한다(창구 사다리 SKILL.md §4 · 대기 시간 상한 없음 · 봇이 대신 답하지 않는다). 인터뷰가 완료되면 다듬은 질문을 다시 채점하고 gate.operator_clarification(interview_session_id 포함)을 함께 제출한다. 첫 채점 gate.initial_verdicts 는 언제나 함께 낸다.',
   INTERVIEW_FRAME,
 ].join('\n');
@@ -535,74 +537,36 @@ const GATE_RULES = [
 const DEICTIC_RE = /(?<![가-힣])(?:이거|그거|저거|요거|이것|그것|저것|이건|그건|저건|이게|그게|저게|이걸|그걸|저걸|이들)/;
 // 사람 글은 NFC 로 맞춘 뒤 본다 — NFD(자모 분리) 글은 한글 낱말 검사(지시대명사·자동 모드·시한 구절)를 모두 지나갔다(0.55.13).
 const nfc = (s) => String(s ?? '').normalize('NFC');
-// 자동 모드 표지(0.55.13 · 좁힌 판 B) — 사람 글(원래 말 · 인터뷰 운영자 답)에서만, «요청 꼴 문장 하나 그 자체»일 때만 센다.
-// 자유 글 속 부정·유보 낱말을 목록으로 가르던 판은 여섯 번의 독립 검증에서 매번 새 꼬리(목록 밖 철회·주제어)가 나와 걷어 냈다 — 오판 비용이 운영자 질문 1회라 끄는 쪽으로 기운다.
-// (가) 인터뷰 답: 봇이 채운 «[from-auto]» 회차를 뺀 «마지막» 운영자 회차 전체가 요청 꼴(맨 «자동 모드»도 됨) — 그 뒤에 운영자가 다른 답(«네 맞아요»·«잠깐만요»)을 하면 끔.
-// (나) 원래 말: 마지막 문장(맺음말 «부탁해요.»·«감사합니다.»만 건너뜀) 전체가 요청 꼴이고(맨 «자동 모드.»·«자동 모드요.»는 안 됨 — «로»나 요청 낱말이 있어야 함), 물음표로 끝나지 않고, 글에 인용·목록 표지가 없고(아래 AUTO_QUOTE_MARK_RE),
-//   그 앞 글에 «자동 모드»·다른 «…모드»·«mode»가 없고, 앞 문장 가운데 술어 없는 짧은 토막(«냉방.»·«제습.» — 모드 이름 나열일 수 있음)이 없을 때.
-// 요청 꼴 = [네·예·응·그냥·그럼·나머지는·남은 건] + «자동 모드»(«자동모드»·«오토 모드») + [로·으로·요·로요] + [안 묻고·묻지 말고·질문 없이·확인 없이·끝까지·알아서] + [해·진행·돌려·가·부탁 꼴]
-//   · 영문 = [please] [use·go with·enable·turn on] «auto mode»(«auto-mode») [please].
-// 사람 글이 시한을 말하면(마감 낱말·시한 꼴) 끈다 — 원래 말의 시한은 인터뷰 근거도 끈다(호출 자리) · 자동 모드는 시한 기본값까지 허용하므로 사람이 말한 시한이 기본값으로 바뀐다(그 시한은 deadline_quote·인터뷰로 · 4회차 검증 F2).
-const AUTO_MENTION_RE = /(?:자동|오토)\s*모드|(?<![A-Za-z-])auto[\s_-]*mode(?![A-Za-z])/gi;
+// 자동 모드 칸(0.55.13) — 자동 모드는 인터뷰의 «자동 모드 칸» 하나로만 켠다: 질문 글이 AUTO_SLOT_LINE 그 글자 그대로인(빈칸 차이만 무시) 회차에
+// 운영자가 «예» 한 낱말(예·네·넵·응·yes·y)로 답했을 때. 원래 말·질문 글 속 «자동 모드로 해 줘»는 근거가 아니다 — 자유 글에서 요청인지
+// 인용·주제어·목록인지 가리는 판정은 낱말·표지를 늘려도 매번 새 빈틈이 나와 걷어 냈다(오판 비용 = 운영자 질문 1회).
+// 끔: 칸 회차가 없음 · 칸 질문 글이 바뀜(다른 말을 붙임) · 답이 «예» 한 낱말이 아님 · 답이 봇 표지 [from-…] · 칸 뒤에 운영자 답 회차가 더 있음 ·
+//   원래 말이나 운영자 답이 시한을 말함(자동 모드는 시한 기본값까지 허용하므로 사람이 말한 시한이 기본값으로 바뀐다 — 그 시한은 인터뷰 ⑤ 칸·deadline_quote 로).
+// 칸을 여러 번 물었으면 마지막 칸 회차가 이긴다.
 const AUTO_INVISIBLE_RE = /[​-‍⁠﻿­]/g;
 const AUTO_DEADLINE_WORD_RE = /마감|시한|기한|데드라인|납기|기일|언제까지|\bdeadlines?\b|\bdue\b|\bETA\b|\bcut-?off\b/i;
-const AUTO_HEAD = '(?:(?:네|예|응|넵|그냥|그럼|나머지는|나머지도|나머지|남은\\s*건|남은\\s*칸은)\\s*[,，]?\\s*)?';
-// 원래 말에서는 «나머지는·남은 건» 머리를 받지 않는다 — 앞에 사람이 맡겨 두지 않은 칸(«범위는 제가 나중에 정할게요»)이 있다는 뜻이라 자동으로 채우면 안 된다.
-const AUTO_HEAD_ORIG = '(?:(?:네|예|응|넵|그냥|그럼)\\s*[,，]?\\s*)?';
-const AUTO_CORE = '(?:자동|오토)\\s*모드';
-const AUTO_PART = '(?:으로요|로요|으로|로|요)';
-const AUTO_PART_ORIG = '(?:으로요|로요|으로|로)'; // 원래 말 «자동 모드요.»는 진술·대답 꼴(«권장은? 자동 모드요.»)과 못 가린다(B1 회차 F5)
-const AUTO_HOW = '(?:(?:안\\s*묻고|안\\s*물어\\s*보고|묻지\\s*말고|질문\\s*없이|확인\\s*없이|끝까지|알아서)\\s*)*';
-const AUTO_VERB = '(?:해|해요|해\\s*줘|해\\s*줘요|해\\s*주세요|해\\s*주십시오|해\\s*줄래요?|할게요?|하자|합시다|하겠습니다|진행|진행해|진행해요|진행해\\s*줘|진행해\\s*주세요|진행하자|진행합시다|진행할게요|' +
-  '돌려|돌려요|돌려\\s*줘|돌려\\s*주세요|가|가요|가자|갑시다|갈게요|부탁해|부탁해요|부탁합니다|부탁드려요|부탁드립니다)';
-const AUTO_EN = '(?:please\\s+)?(?:(?:use|go\\s+with|enable|turn\\s+on)\\s+)?auto[\\s_-]*mode(?:\\s+please)?';
-// 원래 말 = «로·요»나 요청 낱말이 있어야 한다(맨 «자동 모드»·«auto mode»는 주제어와 못 가린다) · 인터뷰 답 = 맨 «자동 모드»도 받는다.
-const AUTO_REQ_ORIG_RE = new RegExp(`^(?:${AUTO_HEAD_ORIG}${AUTO_CORE}(?:\\s*${AUTO_PART_ORIG}(?:\\s*${AUTO_HOW}${AUTO_VERB})?|\\s*${AUTO_HOW}${AUTO_VERB})|(?:please\\s+(?:(?:use|go\\s+with|enable|turn\\s+on)\\s+)?|(?:use|go\\s+with|enable|turn\\s+on)\\s+)auto[\\s_-]*mode(?:\\s+please)?|auto[\\s_-]*mode\\s+please)$`, 'i');
-const AUTO_REQ_ANSWER_RE = new RegExp(`^(?:${AUTO_HEAD}${AUTO_CORE}(?:\\s*${AUTO_PART}(?:\\s*${AUTO_HOW}${AUTO_VERB})?|\\s*${AUTO_HOW}${AUTO_VERB})?|${AUTO_EN})$`, 'i');
-const AUTO_CLOSER_RE = /^(?:부탁(?:해|해요|합니다|드려요|드립니다)|감사합니다|고맙습니다|고마워요|please|thanks?|thank\s+you)$/i;
-// 술어로 끝나는 문장(«…비교해 줘»·«급해요»·«정리 부탁드립니다»)인지 — 아니면 짧은 토막(«냉방»·«Eco»)은 목록일 수 있어 끈다.
-const AUTO_PREDICATE_END_RE = /(?:요|다|줘|해|죠|까|세요|니다|자|게|네|래|야|어|아|지|군|함|음|임|됨|봐|please)$/i;
-// 원래 말에 인용·견본·목록 표지가 있으면 끝 문장이 사람의 요청인지 남의 글인지 못 가린다 → 끈다(B1 회차 F2·F4 · 질문 1회):
-//   «>»·«&gt;»(Slack·Discord 인용) · 콜론 · 여는 따옴표 · 줄 머리 «-»·«*»·«•»·«1.»·«1)»·«#» · 세 줄 이상 · 앞 글의 인용 머리 낱말(«다음과 같다»·«이렇게»·«라고»·«문장»·«문구»·«명령»·«예시»·«보기»·«번역»…).
-const AUTO_QUOTE_MARK_RE = /[>:"“”„‟«»「」『』〈〉《》‘]|&(?:gt|lt|quot|#\d+);|(?:^|\s)'/i;
-const AUTO_LIST_LINE_RE = /(?:^|\n)[ \t]*(?:[-*+•·▪◦‣#]|\d+[.)])/;
-const AUTO_QUOTE_CUE_RE = /다음과\s*같|아래와\s*같|이렇게|이라고|라고|문장|문구|명령|예시|예문|보기|대사|번역|인용|말했|적혀|쓰여|\b(?:quote[sd]?|says?|said|following|examples?|translat\w*|commands?)\b/i;
-const AUTO_SENTENCE_RE = /[^.!?。！？…]+[.!?。！？…]*/g;
-const AUTO_MAX_CHARS = 4000, AUTO_MAX_ANSWER_CHARS = 40000;
-const AUTO_BOT_ROUND_RE = /^\s*\[from-auto\]/i;
-// 전각 ASCII는 반각으로, 폭 없는 글자는 지우고, 줄바꿈은 빈칸으로(줄바꿈은 문장 끝이 아니다 — 줄로 나눈 목록의 끝 줄이 요청으로 읽혔다 · 5회차 검증).
+const AUTO_YES_RE = /^(?:예|네|넵|응|yes|y)$/i;
+const AUTO_MAX_ANSWER_CHARS = 40000;
+const AUTO_BOT_ROUND_RE = /^\s*\[from-[a-z-]+\]/i;
+// 전각 ASCII는 반각으로, 폭 없는 글자는 지우고, 줄바꿈·빈칸은 빈칸 하나로.
 function autoNorm(text) {
   return nfc(text).replace(/[！-～]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0)).replace(/　/g, ' ')
     .replace(AUTO_INVISIBLE_RE, '').replace(/[\r\n\u000b\u000c\u001c-\u001e\u0085\u2028\u2029]+/g, ' ').replace(/\s+/g, ' ').trim();
 }
 const saysDeadline = (t) => AUTO_DEADLINE_WORD_RE.test(t) || DEADLINE_SHAPES.some((re) => re.test(t));
-// 인터뷰 답: [from-auto] 회차를 뺀 운영자 회차들 — 그 글이 시한을 말하면 끄고, 마지막 운영자 회차 전체가 요청 꼴일 때만 켠다.
-function saysAutoModeInAnswers(responses) {
-  const ops = responses.filter((r) => typeof r === 'string' && r.trim() && !AUTO_BOT_ROUND_RE.test(r));
-  if (!ops.length) return false;
-  const joined = autoNorm(ops.join('\n'));
-  if (joined.length > AUTO_MAX_ANSWER_CHARS || saysDeadline(joined)) return false;
-  return saysAutoMode(ops[ops.length - 1], { answer: true });
-}
-function saysAutoMode(text, { answer = false } = {}) {
-  const t = autoNorm(text);
-  if (!t || t.length > AUTO_MAX_CHARS || saysDeadline(t)) return false;
-  const sentences = (t.match(AUTO_SENTENCE_RE) ?? [])  // «vs.»·«e.g.»·«1.»로 갈린 토막은 아래 짧은 토막 검사가 끈다
-   .map((x) => x.trim()).filter(Boolean);
-  const body = (x) => x.replace(/[.!?。！？…~\s]+$/, '').trim();
-  let i = sentences.length - 1;
-  while (i > 0 && AUTO_CLOSER_RE.test(body(sentences[i]))) i--; // 맺음말 «부탁해요.» 건너뜀
-  if (i < 0 || /[?？]/.test(sentences[i])) return false; // 물음 = 요청 아님
-  if (answer) return i === 0 && AUTO_REQ_ANSWER_RE.test(body(sentences[0])); // 인터뷰 답 = 회차 전체가 요청 꼴(맺음말만 덧붙어도 됨)
-  if (!AUTO_REQ_ORIG_RE.test(body(sentences[i]))) return false;
-  const raw = nfc(String(text)).replace(/[\r\u2028\u2029\u0085]/g, '\n');
-  if (AUTO_QUOTE_MARK_RE.test(t) || AUTO_LIST_LINE_RE.test(raw) || raw.split('\n').filter((x) => x.trim()).length >= 3) return false;
-  // 바로 앞 마침표가 문장 끝이 아닐 수 있으면(«Option A v.»·«e.g.»·«etc.»·목록 번호 «2.») 요청 문장이 앞 글에 이어진 것일 수 있어 끈다.
-  if (i > 0 && /(?:\b(?:vs?|e\.g|i\.e|etc|cf|approx|ex|no|nr|p)|\d)\.\s*$/i.test(sentences[i - 1])) return false;
-  const before = sentences.slice(0, i).map(body);
-  if (before.some((s) => /모드|\bmodes?\b/i.test(s) || new RegExp(AUTO_MENTION_RE.source, 'i').test(s))) return false; // 주제어·모드 비교
-  if (before.some((s) => AUTO_QUOTE_CUE_RE.test(s))) return false; // 인용 머리 «다음 문장을 번역해 줘.»·«이렇게 말했어.»
-  return !before.some((s) => { const w = s.split(' ').filter(Boolean); return w.length <= 2 && !AUTO_PREDICATE_END_RE.test(w[w.length - 1] ?? ''); }); // «냉방. 제습. 자동 모드로.»
+const autoSlotKey = (q) => autoNorm(q).replace(/\s+/g, '');
+// 인터뷰 회차들 → 자동 모드 칸에 운영자가 «예»라고 답했는가.
+function autoSlotAnswer(rounds) {
+  const rs = (Array.isArray(rounds) ? rounds : []).filter((r) => r && typeof r.user_response === 'string' && r.user_response.trim());
+  const key = autoSlotKey(AUTO_SLOT_LINE);
+  let k = -1;
+  rs.forEach((r, i) => { if (typeof r.question === 'string' && autoSlotKey(r.question) === key) k = i; });
+  if (k < 0) return false;
+  const ans = rs[k].user_response;
+  if (AUTO_BOT_ROUND_RE.test(ans) || !AUTO_YES_RE.test(autoNorm(ans).replace(/[.!~。]+$/, '').trim())) return false;
+  if (rs.slice(k + 1).some((r) => !AUTO_BOT_ROUND_RE.test(r.user_response))) return false; // 칸 뒤에 운영자가 더 답함 = 자동 모드가 아니었다
+  const joined = autoNorm(rs.filter((r) => !AUTO_BOT_ROUND_RE.test(r.user_response)).map((r) => r.user_response).join('\n'));
+  return joined.length <= AUTO_MAX_ANSWER_CHARS && !saysDeadline(joined);
 }
 // 시한 구절 모양(0.55.13) — 원래 말에 «있기만» 한 조각(한 글자 · 연도 · «까지»·«요일»·«오후» 단독 · 원래 말 전체)은 시한 근거가 아니다.
 // 받는 꼴(인용 글자): 날+표지(«오늘까지»·«금요일 전에») · 날+때(«내일 아침»·«오늘 밤») · 날/때+시각(«오늘 18시»·«오후 3시») · 시각(«18시»·«18시까지»·«18:00 전»·«6pm») ·
@@ -641,11 +605,11 @@ const DEADLINE_SHAPES = [
   '\\b(?:within|in)\\s+(?:\\d+|an?|one|two|three)\\s*(?:min(?:ute)?s?|hours?|hrs?|days?|weeks?)\\b',
 ].map((s) => new RegExp(s, 'i'));
 // 꼴을 이은 인용은 «날짜/날 + (때) + (시각) + (표지)» 순서 하나만 받는다(«11월 10일 오후 6시까지»·«11/10 18:00까지») — 아무 꼴이나 이으면
-// «오늘 3일 안에»·«내일 아침 오늘 밤» 같은 조각 묶음도 받았다(교차 검토 4회차).
+// «오늘 3일 안에»·«내일 아침 오늘 밤» 같은 조각 묶음도 받았다.
 const DL_TIME = `(?:${DL_HOUR}|\\d{1,2}:\\d{2})`;
 const DL_DATE = `(?:(?<![\\d./-])\\d{1,2}\\s*월\\s*\\d{1,2}\\s*일|(?<![\\d./-])\\d{1,2}\\s*\\/\\s*\\d{1,2}|(?:이번|다음)\\s*달\\s*\\d{1,2}\\s*일|${DL_DAY})`;
 const DL_YEAR_DATE = `\\d{4}\\s*(?:년\\s*\\d{1,2}\\s*월\\s*\\d{1,2}\\s*일|[-./]\\s*\\d{1,2}\\s*[-./]\\s*\\d{1,2})`;
-// 날짜 하나 + 때·시각(«오후 3시 30분까지») · 연도가 붙은 날짜는 «까지·전» 같은 표지가 있어야 한다(«2026-11-10 18:00» = 기준 시각일 수 있음) · «…에»(시점) 꼬리는 받지 않는다(5회차 검증).
+// 날짜 하나 + 때·시각(«오후 3시 30분까지») · 연도가 붙은 날짜는 «까지·전» 같은 표지가 있어야 한다(«2026-11-10 18:00» = 기준 시각일 수 있음) · «…에»(시점) 꼬리는 받지 않는다.
 const DL_COMPOSITE_RE = new RegExp(`^(?:(?:${DL_DATE}\\s*(?:${DL_PART}(?:\\s*${DL_TIME})?|${DL_TIME})|(?:${DL_DATE}\\s*)?${DL_PART}\\s*${DL_TIME})\\s*(?:${DL_MARK})?|${DL_YEAR_DATE}\\s*(?:${DL_PART}\\s*)?(?:${DL_TIME}\\s*)?${DL_MARK})\\s*(?:요|은|는)?$`, 'i');
 const DL_MARK_RE = new RegExp(DL_MARK);
 const DL_MAX_OCCURRENCES = 50;
@@ -657,12 +621,12 @@ const DL_RANGE_END_RE = /까지|\buntil\b|\btill\b|\bthrough\b/i;
 const DL_AFTER_OK_RE = /^(?:까지|에|은|는|로|으로|요|도|쯤|경|께|정도|전|안|내|중)/;
 // 인용 바로 뒤 낱말이 꾸미는 말(«3일 안에 배송되는»·«매일 오후 3시에 열리는»)이면 시한이 아니라 대상의 성질이다.
 const DL_ADNOMINAL_RE = /^[가-힣]+(?:는|된|한|인|될|할|던)$/;
-const DL_ADNOMINAL_OK_RE = /^최대한$/; // 부사로 쓰는 «최대한 빨리» · «가능한»은 «가능한 한»일 때만(«가능한 루틴»은 꾸미는 말 · 4회차 검증 F5)
+const DL_ADNOMINAL_OK_RE = /^최대한$/; // 부사로 쓰는 «최대한 빨리» · «가능한»은 «가능한 한»일 때만(«가능한 루틴»은 꾸미는 말)
 const DL_YEAR_BEFORE_RE = /(?:\d{2,4}\s*년도?|작년|올해|금년|지난해|내년|\d{4}\s*[-./])\s*$/;
 // 인용이 시한 구절이 아니면 그 이유(문자열), 맞으면 ''. 인용이 원래 말에 여러 번 나오면 하나라도 문맥 검사를 지나면 받는다.
 function deadlineShapeProblem(dq, oq) {
   if (dq.length > DEADLINE_QUOTE_MAX) return `${DEADLINE_QUOTE_MAX}자를 넘는다`;
-  // 인용 «전체»가 시한 구절이어야 한다 — 시한 꼴이 인용 안 어딘가에 있기만 하면(«Compare EVs by Friday» 통째 인용) 받지 않는다(교차 검토 2회차).
+  // 인용 «전체»가 시한 구절이어야 한다 — 시한 꼴이 인용 안 어딘가에 있기만 하면(«Compare EVs by Friday» 통째 인용) 받지 않는다.
   // 시한 꼴 밖에 남아도 되는 것 = 빈칸·문장부호·표지·조사뿐.
   const strip = (x) => x.replace(/[\s.,!?~∼〜～·:;()\[\]"'“”‘’-]+/g, '');
   const dq1 = dq.replace(/\(\s*[월화수목금토일](?:요일)?\s*\)/g, ' '); // «11월 10일(월)까지»의 요일 괄호
@@ -779,8 +743,8 @@ function gateCheck(gate, question0, deadlineSource = 'default', deadlineQuote) {
     // 둘째 줄부터는 검색 인터뷰 지시문 «전문»과 같아야 한다(공백·줄바꿈 차이만 무시). 표지로 «시작»만 보면, 날 따옴표로
     // 적은 긴 원질문의 뒷부분이 표지 글자로 이어질 때 짧은 다른 원질문의 인터뷰로 통과했다(3차 보안 F·G·H / T3).
     checkInterviewContext(iv, oq || question);
-    // 운영자 답: 시한 검사는 [from-auto] 를 뺀 운영자 회차를 이어 붙인 글로, 요청 꼴은 마지막 운영자 회차 전체로(좁힌 판 B — 뒤 회차의 다른 답 = 끔).
-    const autoAnswer = saysAutoModeInAnswers((Array.isArray(iv.rounds) ? iv.rounds : []).filter((r) => r && typeof r.user_response === 'string').map((r) => r.user_response));
+    // 자동 모드 칸: 질문 글이 AUTO_SLOT_LINE 인 회차에 운영자 «예» · 그 뒤 운영자 답 없음 · 운영자 답에 시한 없음.
+    const autoAnswer = autoSlotAnswer(iv.rounds);
     interview = { ambiguity_score: iv.ambiguity_score, answered_rounds: answered, status: iv.status, auto_answer: autoAnswer };
   }
   // 거부 글에 원래 말로 연 인터뷰 시작 글을 함께 준다 — «근거가 필요하다»만 주면 호출자가 인터뷰를 어떻게 열지 몰라 멈춘다.
@@ -790,18 +754,17 @@ function gateCheck(gate, question0, deadlineSource = 'default', deadlineQuote) {
       `조사 시작 ❌ — 지금 ouroboros_interview 를 시작해 그 질문을 운영자에게 전달하라(창구 사다리 SKILL.md §4). initial_context 에는 아래 ${CTX_BEGIN} 와 ${CTX_END} 사이 글을 한 글자도 바꾸지 말고 그대로 넣는다.\n` +
       `${interviewContextBlock(oq || question)}\n${GATE_RULES}`,
     );
-  // 자동 모드 근거 = 사람 글뿐: 원래 말 또는 인터뷰의 운영자 답. 봇이 쓴 question 은 근거가 아니다.
+  // 자동 모드 근거 = 인터뷰의 자동 모드 칸 답뿐. 원래 말·봇이 쓴 question 속 «자동 모드»는 근거가 아니다. 원래 말이 시한을 말하면 칸 답도 근거 ❌.
   let autoBasis;
-  if (oq && saysAutoMode(oq)) autoBasis = 'original_question';
-  else if (interview?.auto_answer && !(oq && saysDeadline(autoNorm(oq)))) autoBasis = 'interview'; // 원래 말이 시한을 말하면 인터뷰 답도 근거 ❌(B1 회차 F1)
+  if (interview?.auto_answer && !(oq && saysDeadline(autoNorm(oq)))) autoBasis = 'interview';
   if (gate.auto_mode === true && !autoBasis)
-    throw new Error('gate.auto_mode 근거 없음 — 자동 모드는 사람의 원래 말(original_question)의 마지막 문장이나 인터뷰의 마지막 운영자 답이 «자동 모드로 해 줘» 같은 요청 꼴 그 자체일 때만 켜진다(시한을 말한 글 = 끔). 봇이 쓴 질문의 «자동 모드»는 근거가 아니다.');
+    throw new Error('gate.auto_mode 근거 없음 — 자동 모드는 인터뷰의 자동 모드 칸 질문에 운영자가 «예»라고 답했을 때만 켜진다(원래 말이나 운영자 답이 시한을 말하면 끔). 원래 말·봇이 쓴 질문의 «자동 모드»는 근거가 아니다.');
   // 마감 시한 — 사람이 시킨 조사에서 사람이 시한을 안 정했으면 기본값으로 넘기지 않고 같은 운영자 인터뷰에서 묻는다.
   if (origin === 'human' && deadlineSource === 'default' && !autoBasis) {
     if (ocOut)
       throw new Error('P-1 게이트: 마감 시한을 사람이 정하지 않았다(deadline_source = default) — 사람이 시킨 조사는 기본값으로 넘기지 않는다. 인터뷰에서 받은 시한이 있으면 deadline_source = operator 로 내고, 안 물었으면 운영자에게 마감 시한을 물어 받은 뒤 낸다.');
     throw new Error(
-      'P-1 게이트: 마감 시한을 사람이 정하지 않았다(deadline_source = default) — 사람이 시킨 조사는 기본값으로 넘기지 않는다. 조사 시작 ❌ — 지금 ouroboros_interview 를 시작해 ⑤ 마감 시한을 (다른 빈 칸이 있으면 함께) 운영자에게 묻고, 인터뷰가 끝나면 gate.operator_clarification 과 deadline_source = operator 로 다시 낸다(창구 사다리 SKILL.md §4). 운영자가 «자동 모드»를 고르면 남은 칸은 봇이 채운다.\n' +
+      'P-1 게이트: 마감 시한을 사람이 정하지 않았다(deadline_source = default) — 사람이 시킨 조사는 기본값으로 넘기지 않는다. 조사 시작 ❌ — 지금 ouroboros_interview 를 시작해 ⑤ 마감 시한을 (다른 빈 칸이 있으면 함께) 운영자에게 묻고, 인터뷰가 끝나면 gate.operator_clarification 과 deadline_source = operator 로 다시 낸다(창구 사다리 SKILL.md §4). 운영자가 자동 모드 칸에 «예»라고 답하면 남은 칸은 봇이 채운다(인터뷰 지시문).\n' +
       `ouroboros_interview 의 initial_context 에는 아래 ${CTX_BEGIN} 와 ${CTX_END} 사이 글을 한 글자도 바꾸지 말고 그대로 넣는다.\n` +
       `${interviewContextBlock(oq)}\n${GATE_RULES}`,
     );
@@ -1149,6 +1112,9 @@ function selfTest() {
     writeFileSync(join(INTERVIEW_DATA_DIR, `interview_${id}.json`),
       JSON.stringify({ status, ambiguity_score: score, initial_context: ctx, rounds, requirement_distillation: null }), 'utf8');
   };
+  // 회차마다 질문 글·답을 정해 쓰는 인터뷰(자동 모드 칸 시험)
+  const mkIvR = (id, pairs, oq0) => writeFileSync(join(INTERVIEW_DATA_DIR, `interview_${id}.json`), JSON.stringify({ status: 'completed', ambiguity_score: 0.1,
+    initial_context: interviewContextFor(oq0), rounds: pairs.map(([q, a], i) => ({ round_number: i + 1, question: q, user_response: a, provenance: 'user' })), requirement_distillation: null }), 'utf8');
   const results = [];
   const ok = (name, cond, detail = '') => results.push({ name, ok: !!cond, detail });
   // P-1 통과 clearance 표본 — selfTest 의 start 는 전부 이걸 달고 들어간다(게이트 자체 검증은 17~20).
@@ -1768,32 +1734,29 @@ function selfTest() {
        !!s37?.session_id && p37?.original_question === OQ_CLEAR && p37?.origin === 'human' && m37r.includes('운영자 인터뷰 근거') && m37r.includes(interviewContextBlock(OQ_CLEAR)),
        `start=${s37?.err ?? 'PASS'} rewritten=${m37r ? m37r.slice(0, 40) : 'PASS'}`);
 
-    // 38 자동 모드(운영자 지시 2026-11-06): 원래 말에 «자동 모드» = 시한 기본값 허용 · 봇 글(question)에만 있으면 근거 ❌ ·
-    //     auto_mode 신고만 = 거부 · 인터뷰에서 운영자가 «자동 모드»를 고름 = 시한 기본값 허용
+    // 38 자동 모드 칸(0.55.13): 원래 말 «자동 모드로» = 근거 아님(시한 default 거부) · 봇 글(question)에만 있음 = 거부 · auto_mode 신고만 = 거부 ·
+    //     인터뷰 자동 모드 칸 «아니오» = 거부 · 칸 «예» = 시한 기본값 허용(auto_basis interview)
     const OQ_AUTO = '2026년 국내 전기차 판매 상위 다섯 브랜드를 공식 통계로 비교해 줘. 자동 모드로.';
-    const s38a = okStart({ question: OQ_AUTO, salt: 't38a', deadline_source: 'default', gate: { ...G4, original_question: OQ_AUTO } });
-    const p38a = p1Of(s38a);
+    const m38a = rej({ question: OQ_AUTO, salt: 't38a', deadline_source: 'default', gate: { ...G4, original_question: OQ_AUTO } });
     const OQ_NOAUTO = '2026년 국내 전기차 판매 상위 다섯 브랜드를 공식 통계로 비교해 줘.';
-    // 봇 글(question)에만 «자동 모드» — 인터뷰는 거쳤지만 운영자 답에 자동 모드 없음 → 시한 default = 거부
+    // 봇 글(question)에만 «자동 모드» — 인터뷰는 거쳤지만 자동 모드 칸 없음 → 시한 default = 거부
     const m38b = rej({ question: '다듬은 시세 질문 (자동 모드)', salt: 't38b', deadline_source: 'default',
       gate: { ...G4, initial_verdicts: IV_X, original_question: '요즘 시세 알아봐 줘', operator_clarification: { ...oc23, interview_session_id: IV_DL } } });
     const m38c = rej({ question: OQ_NOAUTO, salt: 't38c', deadline_source: 'default', gate: { ...G4, original_question: OQ_NOAUTO, auto_mode: true } });
-    const m38n = rej({ question: '2026년 국내 전기차 판매 상위 다섯 브랜드를 공식 통계로 비교해 줘. 자동 모드 쓰지 마.', salt: 't38n', deadline_source: 'default',
-      gate: { ...G4, original_question: '2026년 국내 전기차 판매 상위 다섯 브랜드를 공식 통계로 비교해 줘. 자동 모드 쓰지 마.' } });
+    const m38n = rej({ question: `${OQ_NOAUTO} 자동 모드로 안 묻고 진행해.`, salt: 't38n', deadline_source: 'default', gate: { ...G4, original_question: `${OQ_NOAUTO} 자동 모드로 안 묻고 진행해.`, auto_mode: true } });
     const IV_NEG = 'interview_ffff000000000003';
-    mkIv(IV_NEG, { status: 'completed', score: 0.15, answers: 1, resp: '자동 모드 말고 직접 답할게요', ctx: interviewContextFor('요즘 시세 알아봐 줘') });
+    mkIvR(IV_NEG, [[AUTO_SLOT_LINE, '아니오']], '요즘 시세 알아봐 줘');
     const m38m = rej({ question: '다듬은 시세 질문', salt: 't38m', deadline_source: 'default',
       gate: { ...G4, initial_verdicts: IV_X, original_question: '요즘 시세 알아봐 줘', operator_clarification: { ...oc23, interview_session_id: IV_NEG } } });
     const IV_AUTO = 'interview_ffff000000000002';
-    mkIv(IV_AUTO, { status: 'completed', score: 0.15, answers: 1, resp: '자동 모드로 해 주세요', ctx: interviewContextFor('요즘 시세 알아봐 줘') });
+    mkIvR(IV_AUTO, [[AUTO_SLOT_LINE, '예']], '요즘 시세 알아봐 줘');
     const s38d = okStart({ question: '다듬은 시세 질문', salt: 't38d', deadline_source: 'default',
       gate: { ...G4, initial_verdicts: IV_X, original_question: '요즘 시세 알아봐 줘', operator_clarification: { ...oc23, interview_session_id: IV_AUTO } } });
     const p38d = p1Of(s38d);
-    ok('자동 모드: 원래 말에 있음 = 시한 default 통과(auto_basis original_question) · 봇 질문에만 있음/신고만 = 거부 · 인터뷰에서 고름 = 통과(auto_basis interview)',
-       p38a?.auto_mode === true && p38a?.auto_basis === 'original_question' &&
-       m38b.includes(U_DL_DEFAULT) && m38c.includes('gate.auto_mode 근거 없음') && m38n.includes(U_DL_DEFAULT) && m38m.includes(U_DL_DEFAULT) &&
+    ok('자동 모드 칸: 원래 말 «자동 모드로»·«안 묻고 진행해» = 거부(근거 아님) · 봇 질문에만/신고만 = 거부 · 칸 «아니오» = 거부 · 칸 «예» = 통과(auto_basis interview)',
+       m38a.includes(U_DL_DEFAULT) && m38b.includes(U_DL_DEFAULT) && m38c.includes('gate.auto_mode 근거 없음') && m38n.includes('gate.auto_mode 근거 없음') && m38m.includes(U_DL_DEFAULT) &&
        p38d?.auto_mode === true && p38d?.auto_basis === 'interview',
-       `orig=${s38a?.err ?? 'PASS'} botq=${m38b ? 'rej' : 'PASS'} flag=${m38c ? 'rej' : 'PASS'} iv=${s38d?.err ?? 'PASS'}`);
+       `orig=${m38a ? 'rej' : 'PASS'} botq=${m38b ? 'rej' : 'PASS'} flag=${m38c ? 'rej' : 'PASS'} m3=${m38n ? 'rej' : 'PASS'} no=${m38m ? 'rej' : 'PASS'} iv=${s38d?.err ?? 'PASS'}`);
 
     // 40 시한 operator 신고만 = 근거 ❌ — 인터뷰도 없고 원래 말 속 시한 인용(deadline_quote)도 없으면 거부(봇이 정한 시한을
     //    operator 로 신고하던 실사용 꼴) · 인용이 원래 말에 없는 글 = 거부 · 원래 말 글자 그대로 = 통과(37) · 인터뷰 거친 operator = 통과(23)
@@ -1808,165 +1771,49 @@ function selfTest() {
        m40a.includes(U_DQ_NONE) && m40a.includes(interviewContextBlock(OQ_CLEAR)) && m40b.includes(U_DQ_NOTIN) && m40c.includes(U_DQ_NONE) && m40s.every((m) => m.includes(U_DQ_SHAPE)),
        `${m40a ? m40a.slice(0, 40) : 'PASS'} | notin=${m40b ? 'rej' : 'PASS'} | blank=${m40c ? 'rej' : 'PASS'} | shape=${m40s.map((m) => (m ? 'rej' : 'PASS')).join(',')}`);
 
-    // 41 자동 모드 판정(0.55.13 · 2~6회차 검증 → 좁힌 판 B · 아래 «B 로 다시 가름»이 지금 기대값) — 앞 판들의 목록(_V1)을 남겨 두고 B 의 뜻으로 다시 가른다:
-    //    ① 글 «전체»에 부정·거절 낱말이 없고 요청 꼴 자리가 있을 때만 켬 ② 요청 꼴 = 뒤에 요청 낱말만, 또는 혼자(앞에 요청 낱말만) 한 문장(인터뷰 답 = 한 절).
-    //    «?» 물음 · 따옴표 안 · 표지 4번+ · 4,000자+ = 안 셈. 오판 비용이 «질문 1회»라 이중 부정·사정 설명(«답을 못 해요»)도 끈다.
-    const AUTO_ON_V1 = ['자동 모드로 해 주세요.', 'AUTO-MODE please', '비교해 줘. 자동 모드로.', '자동 모드요',
-      '자동 모드로요', '자동 모드로 할게요', '자동 모드로 안 묻고 진행해.', '자동 모드로 안 물어보고 끝까지 해 줘.', '오토 모드로.', 'use auto mode',
-      '자동 모드로 진행해 주세요. 질문 없이요.', '자동 모드로 해 줘. 확인 없이 끝까지.', '자동 모드로 해 줘. 묻지 마.', '편안해요. 자동 모드로 해 주세요.', 'auto mode ok', '자동 모드로. 부탁해요.',
-      '자동 모드로 해 줘. 자동 모드로. 자동 모드로 진행해 주세요.', '범위는 국내만… 자동 모드로', '마음이 정해졌어요. 자동 모드로 해 주세요.', '가'.repeat(3988) + '. 자동 모드로 해 줘'];
-    const AUTO_ON_ANSWER_V1 = ['범위는 국내만. 나머지는 자동 모드로', '네, 자동 모드', '그냥 자동 모드', '자동 모드', '자동모드', 'auto mode'];
-    // 원래 말에서는 조사도 요청 낱말도 없는 맨 «자동 모드» 를 요청으로 보지 않는다(계약 = 켜는 꼴은 «자동 모드로 해·진행·돌려·가», 단독은 운영자 답만)
-    const AUTO_OFF_ORIG_V1 = ['자동 모드', '자동모드', 'auto mode', '국내 전기차 판매 비교해 줘. 자동 모드.', '그냥 자동 모드'];
-    const AUTO_OFF_V1 = ['자동 모드 쓰면 안 돼.', '자동 모드가 아니라 나한테 직접 물어봐 줘.', 'no auto mode.', "don't use auto mode.", '자동 모드는 원치 않아.',
-      '자동 모드 절대 쓰지 마.', '자동 모드도 싫어.', '자동 모드 쓰면 안 돼요, 제가 답할게요', '자동 모드 쓰지 마.', '자동 모드 말고 직접 답할게요',
-      '자동 모드, 쓰지 마.', '자동 모드로 해. 아니, 직접 물어봐.', '에어컨 자동 모드와 냉방 모드의 소비전력 차이를 비교해 줘.', '세탁기 자동 모드 세탁 시간을 비교해 줘.',
-      'Compare the auto-moderation features of Discord and Slack.', '미러리스 카메라 자동모드 노출 정확도를 비교해 줘.', '반자동 모드 카메라 출고가를 비교해 줘.',
-      '에어컨을 자동 모드로 해 두면 전기료가 얼마나 나오는지 알려 줘.', '자동 모드 아니면 안 돼.', '자동 모드 말고는 시간이 없어.', '반자동 모드로 해 줘.', 'semi-auto mode please',
-      // 절 끝에 놓인 주제어(3회차 F1 · 교차 검토) — 뒤가 비어도 앞에 다른 말이 있으면 주제어
-      '세탁기 자동 모드', '카메라 자동모드', 'Should I shoot night photos in manual or auto mode? Compare official camera maker guides.',
-      '냉방 모드, 자동 모드, 제습 모드의 소비전력을 삼성·LG 공식 사양서로 비교해 줘.', '소비전력 비교: 냉방 모드 vs 자동 모드', '완전 자동 모드, 반자동 모드 차이를 캐논 공식 매뉴얼로 정리해 줘.',
-      'Summarize the settings page https://docs.example.com/settings/auto-mode', '보기: 1) 직접 답하기 2) 자동 모드',
-      // 거절·물음·따옴표(3회차 F2) — 군말 절·빈 절이 끼어도 글 전체를 본다
-      '자동 모드요? 아뇨, 직접 답할게요. 범위는 국내만.', '자동 모드, 쓰지 마시고 직접 물어봐 주세요.', '자동 모드요? 음… 아니요, 직접 답할게요.',
-      '자동 모드로 해 줘. \n아니, 그냥 직접 물어봐.', '자동 모드요? 그게 뭐예요?', '범위 국내, 기준일 오늘. 그리고 자동 모드?', '자동 모드? 필요 없어요', '자동 모드요? 됐어요',
-      '자동 모드는 사양할게요', 'Auto mode? Nope, ask me.', '“자동 모드로 해 줘.” 이 문구가 들어간 광고 사례를 모아 줘', '자동 모드로 해 줘. 싫다.',
-      '자동 모드 자동 모드 자동 모드 자동 모드',
-      // 표지 4번+ · 4,000자+ = 안 셈(처리 시간 상한 겸 · 긴 붙여넣기 글은 요청이 아니다) · 물음표 없는 거절 «아뇨» · «쓰지 마시고요»
-      '자동 모드로 해 줘. 세탁기 자동 모드, 에어컨 자동 모드, 카메라 자동 모드 비교.', '가 '.repeat(2100) + '자동 모드로 해 줘',
-      '자동 모드요. 아뇨, 직접 답할게요.', '자동 모드로 해 주세요. 아, 역시 쓰지 마시고요.',
-      // 3회차 2차 검증 G1~G4 · 마지막 말이 이긴다(요청 뒤에 다른 문장 = 철회일 수 있음) · 앞에 대상 목적어 = 주제어
-      '드럼세탁기 울 코스를 자동 모드로 해도 돼? 삼성 공식 매뉴얼 기준으로 알려 줘.', '야간 촬영엔 자동 모드 좋아? 캐논 공식 매뉴얼로 알려 줘.', 'Night shots: is auto mode ok? Compare manuals.',
-      '자동 모드요..?', '자동 모드로 해도 돼？', '에어컨을 자동 모드로 켜 줘. 그리고 전기요금 절약 효과를 찾아 줘.', '세탁기를 자동 모드로 해 줘.', 'Best night setting: auto mode please.',
-      'Auto mode please. Don’t use it actually.', 'Auto mode please. Actually that\'s not what I want, I\'d rather answer myself.', '자동 모드 대신 제가 직접 답할게요.',
-      '자동 모드로 해 주세요. 마음이 바뀌었어요.', '자동 모드로 해 주세요. 다시 생각해 보니 하나씩 물어봐 주세요.', '자동 모드로 해 줘. 아\u200b니', '자동 모드로 해 줘. ＮＯ',
-      '「자동 모드로 해 줘」라는 문구', 'I don\'t have time. Auto mode please.', 'auto modeok', 'Use auto modeon', '전기차 판매 비교 자동 모드로 해 줘', '자동 모드로 해 주세요. 편안해요.',
-      '가'.repeat(3989) + '. 자동 모드로 해 줘',
-      // 겹 방어의 층마다 그 층만 막는 꼴(돌연변이로 확인) — 끄는 쪽으로 기운 판정
-      '하나씩 물어봐 주세요. 자동 모드로 해 주세요.', 'I don’t have time. Auto mode please.', '자동 모드 세탁 시간을 비교해 줘.',
-      '자동 모드. 자동 모드. 자동 모드. 자동 모드로 해 주세요.', '역시 직접 쓰지 마시고요. 자동 모드로 해 주세요.', '아뇨. 자동 모드로 해 주세요.', '싫어요. 자동 모드로 해 주세요.',
-      '“자동 모드로 해 주세요”', '「자동 모드로 해 줘」',
-      // 4회차 검증 — 마감을 따로 말하는 글(자동 모드는 시한 기본값도 허용) · 문장 끝 아닌 마침표(«vs.»·«e.g.»·«1.») · 낱말 목록 밖 부정 철자 · «제가 정할게요»
-      '국내 전기차 판매 비교해 줘. 마감은 내가 따로 말해 줄게. 나머지는 자동 모드로 해 줘.', 'I will set the deadline myself. Auto mode please.', '시한은 나중에 알려 줄게요. 자동 모드로 해 주세요.',
-      'Compare battery life in eco mode vs. auto mode please', '1. 냉방 모드로 2. 자동 모드로', 'e.g. auto mode please', '버전 3. 자동 모드로 해 줘',
-      '아닙니다, 자동 모드로 해 줘', '아님. 자동 모드로 해 줘', '아녜요. 자동 모드로 해 줘', '자동 모드 쓰지 마셈', '자동 모드 안됨. 자동 모드로', 'dont use auto mode', 'Don´t. Auto mode please', 'Donʼt. Auto mode please',
-      '자동 모드로. 제가 정할게요', '자동 모드로 해 줘. 범위는 제가 고를게요',
-      // 5회차(4회차 검증 F2·F3·F6) — 시한 구절을 말한 글(자동 모드면 그 시한이 기본값으로 바뀜) · 사이에 낱말 하나 둔 «제가 나중에 정할게요» · «노·놉·skip» · «v.»
-      '내일까지 국내 전기차 판매 비교해 줘. 자동 모드로 해 줘.', 'Compare EV sales by Friday. Auto mode please.', '납기는 금요일. 자동 모드로 해 줘.',
-      '범위는 제가 나중에 정할게요. 나머지는 자동 모드로 해 주세요.', "I'll pick the scope later. Auto mode please.", '노. 자동 모드로 해 줘', '놉. 자동 모드로', 'skip. auto mode please', 'eco mode v. auto mode please', 'Option A v. auto mode please',
-      '에어컨 소비전력을 다음 조건으로 비교해 줘\n냉방 모드로\n자동 모드로', '에어컨 운전 방식별 소비전력 비교\n냉방\n제습\n자동 모드로', '냉방, 제습, 자동 모드로',
-      '범위는 제가 이따가 다시 고를게요. 나머지는 자동 모드로 해 주세요.', '범위는 제가할게요. 나머지는 자동 모드로 해 주세요.', '직접할게요. 자동 모드로 해 주세요.', '범위 결정은 보류합니다. 자동 모드로 해 주세요.', 'Let me confirm the scope later. Auto mode please.', '노 땡큐. 자동 모드로 해 줘', '아\u200b니요. 자동 모드로 해 줘', '쓰지 마셈. 자동 모드로 해 줘', 'Dont. Auto mode please', '잠깐만요. 나머지는 자동 모드로 해 주세요.', '보류할게요. 자동 모드로 해 주세요.', '수동으로 할까 해요. 자동 모드로 해 주세요.', '범위는 저희 팀이 정할게요. 나머지는 자동 모드로 해 주세요.', '국내 전기차 판매 비교해 줘\n자동 모드로 해 줘', '에어컨 소비전력 비교해 줘: 냉방 모드… 자동 모드로', '세탁기 모드를 비교해 줘. 자동 모드로.'];
-    const AUTO_OFF_ANSWER_V1 = ['아\u200b니, 자동 모드로 해 줘', 'ＮＯ, 자동 모드로', '쓰지 마셈, 자동 모드로', 'Dont, auto mode please', '제가 고를게요, 나머지는 자동 모드로', '잠깐, 나머지는 자동 모드로', '보류, 나머지는 자동 모드로'];
-    // 인터뷰 회차 묶음(4회차): 거절·철회·«제가 정할게요»는 어느 회차든 끔 · 요청 꼴은 어느 회차든 켬
-    const ANS_ON_V1 = [['범위는 국내만요', '자동 모드로'], ['자동 모드', ''], ['자동 모드로', '[from-auto] 범위는 국내로 가정한다.'], ['자동 모드로', '[from-auto] 기간은 최근 1년.', '[from-auto] 요약 확인함.']],
-      ANS_OFF_V1 = [['자동 모드로', '범위는 제가 고를게요.'], ['자동 모드로', '역시 싫어요'], ['싫어요', '자동 모드로'], ['네 맞아요.'], ['자동 모드로', '마감은 금요일이에요.'],
-        // 교차 검토 4회차: 목록 밖 말로 한 뒤 회차의 철회 · 봇 회차만 요청
-        ['노', '자동 모드로'], ['skip', '자동 모드로'],
-        ['자동 모드로', '그 방식은 운영자가 최종 결정합니다.'], ['냉방, 제습, 자동 모드로'], ['범위는 국내만, 나머지는 자동 모드로'], ['자동 모드로', '좋아요'], ['자동 모드로', '네 맞아요.'], ['자동 모드로', '[from-auto] 자동 모드는 싫어요'], ['자동 모드로', '[from-auto] 범위는 국내로 하지 않는다.'],
-        [...Array(11).fill('가'.repeat(3990)), '자동 모드로'], ['자동 모드로', '범위는 국내만요'], ['[from-auto] 자동 모드로', '범위는 국내만요'], ['[from-auto] 자동 모드로'],
-        // 4회차 검증 F1 — 목록 밖 말로 거두는 뒤 회차
-        ['자동 모드로', '잠깐만요'], ['자동 모드로', '역시 하나씩 정해요'], ['자동 모드로', 'hold on'], ['자동 모드로', '수동으로 할게요'], ['자동 모드로', '내일까지요'], ['자동 모드로', 'let me decide']];
-    ANS_ON_V1.push(['가 '.repeat(1500) + '범위', '가 '.repeat(1500) + '기간', '자동 모드로']); // 4,000자 상한 = 회차마다 · 이은 글 상한 = 40,000자
-    // ── 좁힌 판 B(부모 가름 11-06): 근거 = 요청 꼴 문장 «그 자체» — 위 목록(앞 판들의 기대값)을 B 의 뜻으로 다시 가른다.
-    // ① 마지막 말이 이긴다: 앞 문장의 거절·유보는 보지 않는다(목록 판정을 걷어 냄) — 원래 말 «싫어요. 자동 모드로 해 주세요.» = 켬 · 인터뷰 [«싫어요», «자동 모드로»] = 켬.
-    //    단 요청 문장 «안»의 부정·다른 말, 앞 글의 «자동 모드»·다른 «…모드», 원래 말 «나머지는 자동 모드로»(남겨 둔 칸이 있다는 뜻), 시한을 말한 글 = 끔.
-    // ② 요청 꼴 문장 «그 자체»만 센다: 요청 뒤 덧붙임(«자동 모드로 해 줘. 묻지 마.»)·말줄임표 앞 토막·인터뷰 답의 앞 문장(«범위는 국내만. 나머지는 자동 모드로») = 끔(질문 1회).
-    const B_LAST_WINS = ["I don't have time. Auto mode please.", '하나씩 물어봐 주세요. 자동 모드로 해 주세요.', 'I don’t have time. Auto mode please.', '역시 직접 쓰지 마시고요. 자동 모드로 해 주세요.',
-      '싫어요. 자동 모드로 해 주세요.', '아녜요. 자동 모드로 해 줘', "I'll pick the scope later. Auto mode please.", '직접할게요. 자동 모드로 해 주세요.', '범위 결정은 보류합니다. 자동 모드로 해 주세요.',
-      'Let me confirm the scope later. Auto mode please.', '아​니요. 자동 모드로 해 줘', '보류할게요. 자동 모드로 해 주세요.', '수동으로 할까 해요. 자동 모드로 해 주세요.'];
-    // B1 회차 검증(F2·F4·F5·F6): 인용(«>»·«&gt;»·여는 따옴표만)·콜론 머리·인용 머리 낱말(«다음과 같다»·«이렇게 말했어»·«번역해 줘»)·세 줄 이상 목록 뒤의 요청 문장 = 끔 ·
-    //   원래 말 «자동 모드요.»(진술·대답 꼴과 못 가림) = 끔(인터뷰 답은 켬) · 앞 글의 영문 «… mode» = 끔.
-    const B1_NOW_OFF = ['자동 모드요'];
-    const B1_OFF_ORIG = ['이 안내가 공식 매뉴얼과 맞는지 확인해 줘\n> 소음이 크면 필터를 청소하세요. 자동 모드로 해 주세요.',
-      '이 상담 답변이 맞는지 확인해 줘\n&gt;&gt;&gt; 고객님, 소음이 크면 필터를 청소하세요. 자동 모드로 해 주세요.', '이 상담 답변이 맞는지 확인해 줘\n>>> 고객님, 소음이 크면 필터를 청소하세요. 자동 모드로 해 주세요.',
-      '이 문구 출처를 찾아 줘: 소음이 크면 필터를 청소하세요. 자동 모드로 해 주세요.', '음성 비서 명령어 인식률 비교해 줘. 대상 명령:\n에어컨 켜 줘.\n자동 모드로 해 줘.',
-      '“소음이 크면 필터를 청소하세요. 자동 모드로 해 주세요.', '보기: 수동 운전. 자동 모드로 해 줘.', '예시 문구는 다음과 같다. 자동 모드로 해 줘.', '상담원이 이렇게 말했어. 자동 모드로 해.',
-      'Check whether this manual step is right: Press the power button. Turn on auto mode.', '다음 문장을 영어로 번역해 줘. 자동 모드로 해 주세요.',
-      '에어컨 소리 크기를 비교해 줘.\n에어컨 켜 줘.\n자동 모드로 해 줘.', '- 국내 전기차 판매 비교해 줘.\n- 자동 모드로 해 줘.', 'Compare eco mode and sport mode. Auto mode please.',
-      'Compare eco and sport modes for range. Auto mode please.', '이 블로그 글이 맞는지 확인해 줘. 전기료 아끼는 설정은? 자동 모드요.', '이 기사 요약이 맞는지 봐 줘. 제조사 권장은 한 가지였다. 오토 모드요.',
-      'Translate the following sentence into Korean. Turn on auto mode.', '- 국내 전기차 판매 비교해 줘.\n자동 모드로 해 줘.'];
-    const B1_ON_ORIG = ['국내 전기차 판매를 비교해 줘.\n자동 모드로 해 줘.', '이 기사 내용을 정리해 줘. 자동 모드로 해 줘.', '자동 모드로요'];
-    const B_NOW_OFF = [...B1_NOW_OFF, '자동 모드로 진행해 주세요. 질문 없이요.', '자동 모드로 해 줘. 확인 없이 끝까지.', '자동 모드로 해 줘. 묻지 마.', 'auto mode ok', '자동 모드로 해 줘. 자동 모드로. 자동 모드로 진행해 주세요.', '범위는 국내만… 자동 모드로'];
-    const AUTO_ON = [...AUTO_ON_V1.filter((x) => !B_NOW_OFF.includes(x) && !x.startsWith('가가가')), ...B_LAST_WINS, '자동 모드로 진행해', '자동 모드로 돌려', '자동 모드로 가', '그냥 자동 모드로 해 주세요.', 'please use auto mode',
-      'Compare auto-moderation tools for online forums. Auto mode please.', 'ａｕｔｏ ｍｏｄｅ ｐｌｅａｓｅ', ...B1_ON_ORIG];
-    const AUTO_ON_ANSWER = [...AUTO_ON_ANSWER_V1.filter((x) => x !== '범위는 국내만. 나머지는 자동 모드로'), '자동 모드로 해 주세요', '나머지는 자동 모드로', '네, 자동 모드로 진행해 주세요.', '자동 모드요'];
-    const AUTO_OFF_ORIG = [...AUTO_OFF_ORIG_V1, ...B_NOW_OFF, '가'.repeat(3988) + '. 자동 모드로 해 줘', '범위는 국내만. 나머지는 자동 모드로 해 주세요.',
-      '냉방. 제습. 자동 모드로.', '냉방… 제습… 자동 모드로', 'Eco. Sport. Auto mode please.', '세탁기 자동 모드 비교해 줘. 자동 모드로 해 줘.', '자동 모드로 해?', '자동 모드로 해 주세요, 부탁해요',
-      // 시한 검사는 전각·폭 없는 글자를 고친 글로 본다 · 마감 낱말 «납기» · 4,000자 상한 · 바로 앞이 «e.g.»·«1.»로 갈린 토막
-      '１８시까지 정리해 줘. 자동 모드로 해 줘.', '내\u200b일까지 정리해 줘. 자동 모드로 해 줘.', '납기는 다음 주 금요일입니다. 자동 모드로 해 줘.', '국내 전기차 판매를 비교해 줘. '.repeat(250) + '자동 모드로 해 줘.',
-      'Compare cars, e.g. auto mode please', '질문 1. 국내 전기차 판매 비교해 줘 2. 자동 모드로 해 줘', ...B1_OFF_ORIG];
-    const AUTO_OFF = AUTO_OFF_V1.filter((x) => !B_LAST_WINS.includes(x));
-    const AUTO_OFF_ANSWER = [...AUTO_OFF_ANSWER_V1, '범위는 국내만. 나머지는 자동 모드로', ...B_LAST_WINS, '자동 모드로 해 줘. 묻지 마.', '자동 모드로 해?'];
-    const B_ANS_LAST_WINS = [['싫어요', '자동 모드로'], ['노', '자동 모드로'], ['skip', '자동 모드로'], ['자동 모드로', '[from-auto] 자동 모드는 싫어요'], ['자동 모드로', '[from-auto] 범위는 국내로 하지 않는다.']];
-    const ANS_ON = [...ANS_ON_V1, ...B_ANS_LAST_WINS];
-    ANS_OFF_V1.push(['마감은 금요일이에요.', '자동 모드로'], ['납기는 다음 주 금요일입니다.', '자동 모드로']); // 운영자 회차가 시한을 말함 = 끔
-    const ANS_OFF = ANS_OFF_V1.filter((r) => !B_ANS_LAST_WINS.some((q) => q.join('|') === r.join('|')));
-    const wrongAns = [...ANS_ON.filter((rs) => !saysAutoModeInAnswers(rs)).map((rs) => `[회차 켬]${rs.join('|')}`), ...ANS_OFF.filter((rs) => saysAutoModeInAnswers(rs)).map((rs) => `[회차 끔]${rs.join('|')}`)];
-    const wrongOn = [...wrongAns, ...[...AUTO_OFF, ...AUTO_OFF_ORIG].filter((s) => saysAutoMode(s)), ...[...AUTO_OFF, ...AUTO_OFF_ANSWER].filter((s) => saysAutoMode(s, { answer: true })).map((s) => `[답]${s}`)];
-    const wrongOff = [...AUTO_ON.filter((s) => !saysAutoMode(s)), ...AUTO_ON_ANSWER.filter((s) => !saysAutoMode(s, { answer: true })).map((s) => `[답]${s}`),
-      ...(saysAutoMode('범위는 국내만, 나머지는 자동 모드로') ? ['[원래 말 쉼표 절 = 끔이어야]'] : [])];
-    // 처리 시간 상한(3회차 F4): 긴 글은 표지 수·글 길이 상한에서 바로 끝난다
-    const t41 = Date.now(); saysAutoMode('자동 모드 '.repeat(20000) + '비교해 줘'); saysAutoMode('가'.repeat(100000) + ' 자동 모드로 해 줘');
-    saysAutoModeInAnswers(['1'.repeat(39000), '자동 모드로']); const ms41 = Date.now() - t41; // 숫자 덩이 = 시한 꼴 검사가 제곱으로 늘던 꼴(5회차 검증)
-    // 서버 왕복: 부정 원래 말·주제어 원래 말 + 시한 default = 거부(고유 문구) · 묻지 말라는 요청 꼴 = 통과(auto_basis original_question)
-    const OQ_NEGAUTO = `${OQ_NOAUTO} 자동 모드가 아니라 나한테 직접 물어봐 줘.`;
-    const m41n = rej({ question: OQ_NEGAUTO, salt: 't41n', deadline_source: 'default', gate: { ...G4, original_question: OQ_NEGAUTO } });
-    const OQ_TOPIC = '세탁기 자동 모드 세탁 시간을 삼성·LG 2026년형 공식 사양서로 비교해 줘.';
-    const m41t = rej({ question: OQ_TOPIC, salt: 't41t', deadline_source: 'default', gate: { ...G4, original_question: OQ_TOPIC } });
-    const OQ_M3 = `${OQ_NOAUTO} 자동 모드로 안 묻고 진행해.`;
-    const p41 = p1Of(okStart({ question: OQ_M3, salt: 't41p', deadline_source: 'default', gate: { ...G4, original_question: OQ_M3 } }));
-    // 인터뷰 회차는 이어 붙여 본다(3회차 F3): 1회차 켬 + 2회차 철회 = 끔 · NFD 운영자 답 = NFC 와 같음
-    const IV_RETRACT = 'interview_ffff000000000005';
-    writeFileSync(join(INTERVIEW_DATA_DIR, `interview_${IV_RETRACT}.json`), JSON.stringify({ status: 'completed', ambiguity_score: 0.1, initial_context: interviewContextFor('요즘 시세 알아봐 줘'),
-      rounds: [{ round_number: 1, question: 'q', user_response: '자동 모드로 해 주세요.', provenance: 'user' },
-        { round_number: 2, question: 'q', user_response: '아니요, 자동 모드 취소하고 제가 답할게요.', provenance: 'user' }], requirement_distillation: null }), 'utf8');
-    const m41r = rej({ question: '다듬은 시세 질문', salt: 't41r', deadline_source: 'default',
-      gate: { ...G4, initial_verdicts: IV_X, original_question: '요즘 시세 알아봐 줘', operator_clarification: { ...oc23, interview_session_id: IV_RETRACT } } });
-    const IV_NFD_ANS = 'interview_ffff000000000006';
-    mkIv(IV_NFD_ANS, { status: 'completed', score: 0.15, answers: 1, resp: '자동 모드로 해 주세요'.normalize('NFD'), ctx: interviewContextFor('요즘 시세 알아봐 줘') });
-    const p41d = p1Of(okStart({ question: '다듬은 시세 질문', salt: 't41d', deadline_source: 'default',
-      gate: { ...G4, initial_verdicts: IV_X, original_question: '요즘 시세 알아봐 줘', operator_clarification: { ...oc23, interview_session_id: IV_NFD_ANS } } }));
-    // 회차 잇기는 줄 나눔으로(문장 경계) — 1회차 다른 칸 답 + 2회차 «자동 모드로» = 켬(이어 붙인 글의 마지막 문장이 요청)
-    const IV_TWO = 'interview_ffff000000000007';
-    writeFileSync(join(INTERVIEW_DATA_DIR, `interview_${IV_TWO}.json`), JSON.stringify({ status: 'completed', ambiguity_score: 0.1, initial_context: interviewContextFor('요즘 시세 알아봐 줘'),
-      rounds: [{ round_number: 1, question: 'q', user_response: '범위는 국내만요', provenance: 'user' },
-        { round_number: 2, question: 'q', user_response: '자동 모드로', provenance: 'user' }], requirement_distillation: null }), 'utf8');
-    // 끝 회차가 봇이 채운 «[from-auto]» 확인이면 앞 운영자 회차의 «자동 모드로» = 켬 · 뒤 회차가 마감을 따로 말함 = 끔
-    const IV_CONF = 'interview_ffff000000000009', IV_DLW = 'interview_ffff00000000000a';
-    for (const [id, r2] of [[IV_CONF, '[from-auto] 네 맞아요.'], [IV_DLW, '마감은 제가 따로 정할게요.']]) // 끝 회차 = 봇이 채운 확인(운영자 확인 답이면 끔 · ANS_OFF)
-      writeFileSync(join(INTERVIEW_DATA_DIR, `interview_${id}.json`), JSON.stringify({ status: 'completed', ambiguity_score: 0.1, initial_context: interviewContextFor('요즘 시세 알아봐 줘'),
-        rounds: [{ round_number: 1, question: 'q', user_response: '자동 모드로', provenance: 'user' }, { round_number: 2, question: 'q', user_response: r2, provenance: 'user' }], requirement_distillation: null }), 'utf8');
-    const p41conf = p1Of(okStart({ question: '다듬은 시세 질문', salt: 't41cf', deadline_source: 'default',
-      gate: { ...G4, initial_verdicts: IV_X, original_question: '요즘 시세 알아봐 줘', operator_clarification: { ...oc23, interview_session_id: IV_CONF } } }));
-    const m41dlw = rej({ question: '다듬은 시세 질문', salt: 't41dw', deadline_source: 'default',
-      gate: { ...G4, initial_verdicts: IV_X, original_question: '요즘 시세 알아봐 줘', operator_clarification: { ...oc23, interview_session_id: IV_DLW } } });
-    const IV_REF1 = 'interview_ffff000000000008';
-    writeFileSync(join(INTERVIEW_DATA_DIR, `interview_${IV_REF1}.json`), JSON.stringify({ status: 'completed', ambiguity_score: 0.1, initial_context: interviewContextFor('요즘 시세 알아봐 줘'),
-      rounds: [{ round_number: 1, question: 'q', user_response: '자동 모드로', provenance: 'user' },
-        { round_number: 2, question: 'q', user_response: '자동 모드는 싫어요', provenance: 'user' }], requirement_distillation: null }), 'utf8'); // B: 뒤 회차 철회 = 끔
-    const m41ref1 = rej({ question: '다듬은 시세 질문', salt: 't41f', deadline_source: 'default',
-      gate: { ...G4, initial_verdicts: IV_X, original_question: '요즘 시세 알아봐 줘', operator_clarification: { ...oc23, interview_session_id: IV_REF1 } } });
-    // B1 회차 F1: 원래 말이 시한을 말하면 인터뷰 답 «자동 모드로»도 근거가 못 된다(자동 모드면 그 시한이 기본값으로 바뀜) · 대조 = 시한 없는 원래 말 + 같은 답 = 켬(p41conf)
-    const OQ_DL = '내일까지 국내 전기차 판매 비교해 줘', IV_OQDL = 'interview_ffff00000000000b';
-    mkIv(IV_OQDL, { status: 'completed', score: 0.1, answers: 1, resp: '자동 모드로', ctx: interviewContextFor(OQ_DL) });
-    const m41oqdl = rej({ question: '다듬은 전기차 질문', salt: 't41od', deadline_source: 'default',
-      gate: { ...G4, initial_verdicts: IV_X, original_question: OQ_DL, operator_clarification: { ...oc23, interview_session_id: IV_OQDL } } });
-    const p41two = p1Of(okStart({ question: '다듬은 시세 질문', salt: 't41w', deadline_source: 'default',
-      gate: { ...G4, initial_verdicts: IV_X, original_question: '요즘 시세 알아봐 줘', operator_clarification: { ...oc23, interview_session_id: IV_TWO } } }));
-    ok(`자동 모드 판정: 요청 꼴만 켬(원래 말 ${AUTO_ON.length} · 인터뷰 답 +${AUTO_ON_ANSWER.length}) · 부정·거절·물음·따옴표·주제어·낱말 가운데 = 끔(${AUTO_OFF.length}, 두 모드) · 원래 말 맨 언급 = 끔(${AUTO_OFF_ORIG.length}) · 긴 글 상한 · 서버 왕복 부정·주제어·회차 철회 = 거부 · NFD 답·«안 묻고» = 통과`,
-       !wrongOn.length && !wrongOff.length && ms41 < 500 && m41n.includes(U_DL_DEFAULT) && m41t.includes(U_DL_DEFAULT) && m41r.includes(U_DL_DEFAULT) &&
-       p41?.auto_mode === true && p41?.auto_basis === 'original_question' && p41d?.auto_mode === true && p41d?.auto_basis === 'interview' && p41two?.auto_mode === true && m41ref1.includes(U_DL_DEFAULT) && m41oqdl.includes(U_DL_DEFAULT) &&
-       p41conf?.auto_mode === true && m41dlw.includes(U_DL_DEFAULT),
-       `wrongOn=${JSON.stringify(wrongOn)} wrongOff=${JSON.stringify(wrongOff)} ms=${ms41} neg=${m41n ? 'rej' : 'PASS'} topic=${m41t ? 'rej' : 'PASS'} retract=${m41r ? 'rej' : 'PASS'} m3=${p41?.auto_mode} nfdAns=${p41d?.auto_mode} conf=${p41conf?.auto_mode} dlWord=${m41dlw ? 'rej' : 'PASS'} oqDl=${m41oqdl.includes(U_DL_DEFAULT) ? 'rej' : 'PASS'} twoRounds=${p41two?.auto_mode}`);
+    // 41 자동 모드 칸 판정(0.55.13) — 근거 = 질문 글이 AUTO_SLOT_LINE(빈칸 차이만 무시)인 회차의 운영자 «예» 한 낱말 · 그 뒤 운영자 답 없음 · 운영자 답에 시한 없음.
+    const SL = AUTO_SLOT_LINE, R = (q, a) => ({ question: q, user_response: a });
+    const SLOT_ON = [[R(SL, '예')], [R(SL, '네')], [R(SL, '넵.')], [R(SL, 'yes')], [R(SL, 'Y')], [R(SL, '응!')], [R(SL, 'Ｙｅｓ')], [R(SL, '네'.normalize('NFD'))], [R(SL, '\u3000예\u3000')], [R(SL, '예\u200b')],
+      [R(SL.normalize('NFD'), '예')], [R(SL.replace(/ /g, '  '), '예')], [R(SL.replace(/ /g, '\n'), '예')],
+      [R('범위는 어디까지 볼까요?', '국내만요'), R(SL, '예')], [R(SL, '예'), R('q', '[from-auto] 범위는 국내로 가정한다.'), R('이대로 맞나요?', '[from-auto] 네 맞아요.')],
+      [R(SL, '예'), R('q', '')], [R(SL, '아니오'), R(SL, '예')], [R(SL, '예'), R('기간은요?', '[from-safe-default] 최근 1년')], [R(SL, '예'), R('마감은요?', '[from-auto] 시한은 기본값으로 둔다')]];
+    const SLOT_OFF = [[], [R('q', '예')], [R('q', '자동 모드로')], [R('자동 모드로 할까요?', '예')], [R(SL, '아니오')], [R(SL, '아니요')], [R(SL, '자동 모드로')], [R(SL, '자동 모드로 해 주세요')],
+      [R(SL, '예, 범위는 국내만')], [R(SL, '네 맞아요')], [R(SL, '예요')], [R(SL, '예?')], [R(SL, '예 아니오')], [R(SL, '[from-auto] 예')], [R(SL, '[from-safe-default] 예')], [R(SL, '  [FROM-AUTO] 네')],
+      [R(SL, '예'), R('범위는 어디까지 볼까요?', '국내만요')], [R(SL, '예'), R('이대로 맞나요?', '네 맞아요.')], [R(SL, '예'), R(SL, '아니오')],
+      [R(SL + ' 그리고 범위는 국내만 볼까요?', '네')], [R('안녕하세요. ' + SL, '네')], [R(SL.replace('예/아니오', '네/아니오'), '네')], [R(SL.replace('[자동 모드 칸] ', ''), '예')],
+      [R('마감은 언제까지인가요?', '내일까지요'), R(SL, '예')], [R('q', '납기는 금요일'), R(SL, '예')], [R('q', '１８시까지'), R(SL, '예')], [R('q', '내\u200b일까지'), R(SL, '예')],
+      [...Array.from({ length: 11 }, () => R('q', '가'.repeat(3990))), R(SL, '예')], [{ question: SL, user_response: null }], [{ question: null, user_response: '예' }], [R(SL, 7)], [null, R(SL, '아니오')]];
+    const wrong41 = [...SLOT_ON.filter((rs) => !autoSlotAnswer(rs)).map((rs) => `[켬이어야]${JSON.stringify(rs).slice(0, 160)}`),
+      ...SLOT_OFF.filter((rs) => autoSlotAnswer(rs)).map((rs) => `[끔이어야]${JSON.stringify(rs).slice(0, 160)}`)];
+    // 처리 시간 상한: 회차 2,000개 · 숫자 덩이 39,000자(시한 꼴 검사)
+    const t41 = Date.now(); autoSlotAnswer(Array.from({ length: 2000 }, () => R(SL, '1'.repeat(19)))); autoSlotAnswer([R('q', '1'.repeat(39000)), R(SL, '예')]); const ms41 = Date.now() - t41;
+    // 서버 왕복: 칸 «예» = 통과 · 봇 확인 회차 뒤 = 통과 · 원래 말 «안 묻고 진행해»만 = 거부 · 원래 말 시한 + 칸 «예» = 거부 · 운영자 시한 회차 + 칸 «예» = 거부 ·
+    //   칸 질문 글을 바꿈 = 거부 · 칸 뒤 운영자 답 = 거부
+    const OQ41 = '요즘 시세 알아봐 줘', OQ_DL = '내일까지 국내 전기차 판매 비교해 줘';
+    const iv41 = (id, pairs, oq0 = OQ41) => { mkIvR(id, pairs, oq0); return { ...G4, initial_verdicts: IV_X, original_question: oq0, operator_clarification: { ...oc23, interview_session_id: id } }; };
+    const p41on = p1Of(okStart({ question: '다듬은 시세 질문', salt: 't41a', deadline_source: 'default', gate: iv41('interview_ffff000000000010', [[SL, '예']]) }));
+    const p41bot = p1Of(okStart({ question: '다듬은 시세 질문', salt: 't41b', deadline_source: 'default',
+      gate: iv41('interview_ffff000000000011', [[SL, '네'], ['이대로 맞나요?', '[from-auto] 네 맞아요.']]) }));
+    const m41orig = rej({ question: `${OQ_NOAUTO} 자동 모드로 안 묻고 진행해.`, salt: 't41c', deadline_source: 'default', gate: { ...G4, original_question: `${OQ_NOAUTO} 자동 모드로 안 묻고 진행해.` } });
+    const m41oqdl = rej({ question: '다듬은 전기차 질문', salt: 't41d', deadline_source: 'default', gate: iv41('interview_ffff000000000012', [[SL, '예']], OQ_DL) });
+    const m41opdl = rej({ question: '다듬은 시세 질문', salt: 't41e', deadline_source: 'default', gate: iv41('interview_ffff000000000013', [['마감은 언제까지인가요?', '금요일까지요'], [SL, '예']]) });
+    const m41para = rej({ question: '다듬은 시세 질문', salt: 't41f', deadline_source: 'default', gate: iv41('interview_ffff000000000014', [['안녕하세요. ' + SL, '네']]) });
+    const m41later = rej({ question: '다듬은 시세 질문', salt: 't41g', deadline_source: 'default', gate: iv41('interview_ffff000000000015', [[SL, '예'], ['범위는 어디까지 볼까요?', '국내만요']]) });
+    const m41flag = rej({ question: '다듬은 시세 질문', salt: 't41h', deadline_source: 'default', gate: { ...iv41('interview_ffff000000000016', [[SL, '아니오']]), auto_mode: true } });
+    const rj41 = { orig: m41orig, oqdl: m41oqdl, opdl: m41opdl, para: m41para, later: m41later };
+    ok(`자동 모드 칸 판정: 칸 «예» = 켬(${SLOT_ON.length}) · 칸 없음·질문 글 바뀜·«예» 아닌 답·봇 표지·칸 뒤 운영자 답·시한 = 끔(${SLOT_OFF.length}) · 처리 시간 상한 · 서버 왕복 켬 2 · 거부 6(고유 문구)`,
+       !wrong41.length && ms41 < 500 && p41on?.auto_mode === true && p41on?.auto_basis === 'interview' && p41bot?.auto_mode === true &&
+       Object.values(rj41).every((m) => m.includes(U_DL_DEFAULT)) && m41flag.includes('gate.auto_mode 근거 없음'),
+       `wrong=${JSON.stringify(wrong41)} ms=${ms41} on=${p41on?.auto_mode} bot=${p41bot?.auto_mode} ${Object.entries(rj41).map(([k, m]) => `${k}=${m.includes(U_DL_DEFAULT) ? 'rej' : 'PASS'}`).join(' ')} flag=${m41flag ? 'rej' : 'PASS'}`);
 
-    // 42 시한 인용 모양(0.55.13 · 2회차 M1·M2 · 3회차 F5·F6) — 인용 글자가 시한 꼴이어야 하고(saysAutoMode 아래 주석의 받는 꼴), 원래 말 속 자리도 본다:
-    //    숫자·영문 낱말 가운데에서 자른 인용 · 앞이 연도인 표지 없는 날짜 · 뒤가 «기준·현재» · «까지» 끝인데 같은 절 앞에 «부터·에서·~(숫자 뒤)» = 거부(«지금부터»도 기간 시작 · 4회차: 숫자 뒤 «~»·«-» 바로 뒤 = «까지» 없어도 기간 끝 · 영문 앞 글자 이어짐 = 잘림).
+    // 42 시한 인용 모양(0.55.13) — 인용 글자가 시한 꼴이어야 하고(saysAutoMode 아래 주석의 받는 꼴), 원래 말 속 자리도 본다:
+    //    숫자·영문 낱말 가운데에서 자른 인용 · 앞이 연도인 표지 없는 날짜 · 뒤가 «기준·현재» · «까지» 끝인데 같은 절 앞에 «부터·에서·~(숫자 뒤)» = 거부(«지금부터»도 기간 시작 · 숫자 뒤 «~»·«-» 바로 뒤 = «까지» 없어도 기간 끝 · 영문 앞 글자 이어짐 = 잘림).
     const OQ_B = '2026년 국내 전기차 판매 상위 다섯 브랜드를 국토부 공식 통계로 비교해 줘.';
     const DL_OK = ['3일 안에', '일주일 내', '사흘 안에', '11월 10일 전에', '11/10', '이번 달 말', '월말', '2시간 이내', '1시간 안에', '30분 안에', '금요일 전에',
       'by Friday', 'EOD', '오늘 18시까지', '내일 오전 중', '2026-11-10까지', '18:00 전까지', '오후 3시',
       '내일 아침', '오늘 밤', '이번 주 금요일', '18시', 'tonight', '12월 첫째 주까지', '퇴근 전까지', '2시간 뒤까지', '11.10까지', '11-10까지', '늦어도 내일', '금욜까지',
       'ASAP', 'end of day', '6pm',
-      // 4회차 검증 — 꼴 여러 개를 이은 인용(0.55.12·앞 판이 받던 것) · 요일 괄호 · 다음 달 N일
+      // 꼴 여러 개를 이은 인용(0.55.12·앞 판이 받던 것) · 요일 괄호 · 다음 달 N일
       '11월 10일 오후 6시까지', '11월 10일(월)까지', '11/10 18:00까지', '다음 달 10일까지', '내일 오후 3시까지', '금요일 18:00 전', '오후 3시 30분까지', '11월 10일 오전 9시 30분까지', '2026-11-10 18:00까지'];
     const okDl = DL_OK.map((q, i) => { const oq = `${OQ_B} ${q} 부탁해.`;
       const s = okStart({ question: oq, salt: `t42a${i}`, deadline_source: 'operator', deadline_quote: q, gate: { ...G4, original_question: oq } });
@@ -1988,18 +1835,18 @@ function selfTest() {
       ['30분 만에 완충되는 전기차 모델을 공식 자료로 알려 줘.', '30분 만에'], ['11월 10일 기준 국내 전기차 등록 대수를 국토부 공식 통계로 알려 줘.', '11월 10일'],
       ['11/1~11/10까지 나온 전기차 기사를 모아 줘.', '11/10까지'], ['13시 기준 서울 기온과 23시 기준 기온을 기상청 공식 자료로 알려 줘.', '3시'],
       [`국내 전기차 판매 공식 통계. 오늘${' '.repeat(34)}18시까지`, `오늘${' '.repeat(34)}18시까지`], ['2026년 11월 1일 국내 전기차 등록 대수를 국토부 공식 통계로 알려 줘.', '11월 1일'], 
-      // 4회차 검증 — 숫자 뒤 «~»·«-» 바로 뒤(«까지» 없음) · 영문 낱말 가운데(«nearby»의 «by») · 숫자 가운데(«13일»의 «3일»)
+      // 숫자 뒤 «~»·«-» 바로 뒤(«까지» 없음) · 영문 낱말 가운데(«nearby»의 «by») · 숫자 가운데(«13일»의 «3일»)
       ['11월 1일~11월 10일 나온 전기차 기사를 모아 줘.', '11월 10일'], ['11월 1일 - 11월 10일 나온 전기차 기사를 모아 줘.', '11월 10일'],
       ['List EV dealers nearby Friday market from official data.', 'by Friday'], ['13일 안에 전기차 부품 목록을 공식 자료로 줘.', '3일 안에'],
-      // 4회차 검증 F4·F5 — 기간 전체·비교 대상 둘을 이은 인용 · 진짜 꾸미는 말(«간단한 요리»·«가능한 루틴»)
+      // 기간 전체·비교 대상 둘을 이은 인용 · 진짜 꾸미는 말(«간단한 요리»·«가능한 루틴»)
       ['11/1~11/10 나온 전기차 기사를 모아 줘.', '11/1~11/10'], ['11월 1일 11월 10일 판매량 비교해 줘.', '11월 1일 11월 10일'], ['오늘 18시 내일 18시 기온을 비교해 줘.', '오늘 18시 내일 18시'],
       ['30분 안에 간단한 요리 레시피를 공식 자료로 찾아 줘.', '30분 안에'], ['2026-11-10 18:00 기온을 기상청 자료로 알려 줘.', '2026-11-10 18:00'], ['11월 10일 오후 6시에 열린 회의 자료를 모아 줘.', '11월 10일 오후 6시에'],
       ['11월 1일과 11월 10일 사이 나온 기사를 모아 줘.', '11월 10일'], ['Collect EV news between 11/1 and 11/10.', '11/10'], ['11월 1일부터 11월 10일 사이 나온 기사를 모아 줘.', '11월 10일'], ['Collect EV news from 11/1 to 11/10.', '11/10'], ['30분 안에 가능한 홈트 루틴을 찾아 줘.', '30분 안에'],
-      // 교차 검토 4회차 — 꼴 조각을 아무렇게나 이은 인용
+      // 꼴 조각을 아무렇게나 이은 인용
       [`${'국내 전기차 판매 공식 통계.'} 오늘 3일 안에 줘.`, '오늘 3일 안에'], ['국내 전기차 판매 공식 통계. 내일 아침 오늘 밤 줘.', '내일 아침 오늘 밤'], ['국내 전기차 판매 공식 통계. 3일 안에 3일 안에 줘.', '3일 안에 3일 안에'],
-      // 인용 전체가 시한 구절이어야 한다 — 문장 통째 인용(교차 검토 2회차)
+      // 인용 전체가 시한 구절이어야 한다 — 문장 통째 인용
       ['Compare EVs by Friday', 'Compare EVs by Friday'],
-      // 3회차 2차 검증 G5·G6 — «지금부터·오늘부터»도 기간 시작 · «까지»를 뺀 인용 · 영어 from…until · 같은 절 먼 «부터» · 붙임표·이후 · 꾸미는 말 · 연도 꼴
+      // «지금부터·오늘부터»도 기간 시작 · «까지»를 뺀 인용 · 영어 from…until · 같은 절 먼 «부터» · 붙임표·이후 · 꾸미는 말 · 연도 꼴
       ['지금부터 금요일까지 예정된 공모주 청약 일정을 정리해 줘.', '금요일까지'], ['오늘부터 금요일까지 서울 날씨 예보를 기상청 공식 자료로 정리해 줘.', '금요일까지'],
       ['지금부터 11월 1일부터 11월 10일까지 나온 전기차 기사를 모아 줘.', '11월 10일까지'], ['11월 1일부터 11월 10일까지 나온 전기차 기사를 모아 줘.', '11월 10일'],
       ['2020년부터 이번 달 말까지 국내 전기차 판매량을 정리해 줘.', '이번 달 말'], ['Summarize EV sales from 2020 until today using official data.', 'until today'],
@@ -2009,7 +1856,7 @@ function selfTest() {
       ['전기차 30분 만에 충전 비교 자료를 공식 자료로 찾아 줘.', '30분 만에'],
       ['내일까지만 하는 할인 행사를 공식 쇼핑몰에서 찾아 줘.', '내일까지'], ['Summarize EV sales from 2020 until today.', 'from 2020 until today'], ['국내 전기차 판매 비교 오늘 18시까지 부탁', '전기차 판매 비교 오늘 18시까지'],
       [RANGE_OQ, '11월 10일까지']];
-    // 처리 시간 상한(3회차 2차): 모든 자리가 거부되는 긴 원래 말(12만 자)도 자리 50곳에서 끝난다
+    // 처리 시간 상한: 모든 자리가 거부되는 긴 원래 말(12만 자)도 자리 50곳에서 끝난다
     const t42 = Date.now(); deadlineShapeProblem('오늘 18시까지', '부터 오늘 18시까지 '.repeat(10000)); const ms42 = Date.now() - t42;
     const badDl = DL_BAD.map(([oq, q], i) => rej({ question: oq, salt: `t42b${i}`, deadline_source: 'operator', deadline_quote: q, gate: { ...G4, original_question: oq } }));
     ok(`시한 인용 모양: 받는 꼴 ${DL_OK.length} + 문맥 꼴 ${DL_OK_CTX.length}(지금부터 N시간·물결·두 번 나옴·40자·앞 절의 부터·뒤 «까지» 이음·기준금리) = 통과 · 조각·낱말 가운데·연도·기준일·기간 끝·41자 = 거부(${DL_BAD.length}, 고유 문구) · 기간 끝 = 이유 안내`,
@@ -2020,13 +1867,16 @@ function selfTest() {
     const OQ_NFD_D = '그거 가격 알아봐 줘. 18:00 전까지.'.normalize('NFD');
     const m43d = rej({ question: OQ_NFD_D, salt: 't43a', deadline_quote: '18:00 전까지'.normalize('NFD'), gate: { ...G4, original_question: OQ_NFD_D } });
     const s43 = okStart({ question: OQ_CLEAR, salt: 't43b', deadline_source: 'operator', deadline_quote: '오늘 18시까지', gate: { ...G4, original_question: OQ_CLEAR.normalize('NFD') } });
-    const p43a = p1Of(okStart({ question: OQ_AUTO.normalize('NFD'), salt: 't43c', deadline_source: 'default', gate: { ...G4, original_question: OQ_AUTO.normalize('NFD') } }));
+    const s43q = okStart({ question: OQ_CLEAR.normalize('NFD'), salt: 't43e', deadline_source: 'operator', deadline_quote: '오늘 18시까지', gate: { ...G4, original_question: OQ_CLEAR } }); // NFD 질문 + NFC 원래 말 = 같은 말
+    mkIvR('interview_ffff00000000001a', [[AUTO_SLOT_LINE.normalize('NFD'), '예'.normalize('NFD')]], '요즘 시세 알아봐 줘');
+    const p43a = p1Of(okStart({ question: '다듬은 시세 질문', salt: 't43c', deadline_source: 'default',
+      gate: { ...G4, initial_verdicts: IV_X, original_question: '요즘 시세 알아봐 줘', operator_clarification: { ...oc23, interview_session_id: 'interview_ffff00000000001a' } } }));
     const IV_NFD = 'interview_ffff000000000004';
     mkIv(IV_NFD, { status: 'completed', score: 0.1, answers: 2, ctx: interviewContextFor('요즘 시세 알아봐 줘').normalize('NFD') });
     const s43i = okStart({ question: '다듬은 시세 질문', salt: 't43d', deadline_source: 'operator',
       gate: { ...G4, initial_verdicts: IV_X, original_question: '요즘 시세 알아봐 줘', operator_clarification: { ...oc23, interview_session_id: IV_NFD } } });
-    ok('NFC: NFD 원래 말 «그거» = 지시대명사 거부 · NFD 원래 말 + NFC 질문 = 같은 말(원장 NFC) · NFD «자동 모드로» = 켬 · NFD 인터뷰 시작 글 = 같은 글',
-       m43d.includes('원래 말에 지시대명사(«그거»') && !!s43?.session_id && p1Of(s43)?.original_question === OQ_CLEAR && p43a?.auto_mode === true && !!s43i?.session_id,
+    ok('NFC: NFD 원래 말 «그거» = 지시대명사 거부 · NFD 원래 말 + NFC 질문 · NFC 원래 말 + NFD 질문 = 같은 말(원장 NFC) · NFD 자동 모드 칸 «예» = 켬 · NFD 인터뷰 시작 글 = 같은 글',
+       m43d.includes('원래 말에 지시대명사(«그거»') && !!s43?.session_id && p1Of(s43)?.original_question === OQ_CLEAR && !!s43q?.session_id && p43a?.auto_mode === true && !!s43i?.session_id,
        `deictic=${m43d ? m43d.slice(0, 30) : 'PASS'} same=${s43?.err ?? 'PASS'} auto=${p43a?.auto_mode} iv=${s43i?.err ?? 'PASS'}`);
 
     // 44 고유 문구 자체 검사(0.55.13 · M4) — 위 시험이 단언하는 거부 문구는 모든 거부에 붙는 GATE_RULES·인터뷰 지시문에 없어야 판별력이 있다
@@ -2036,8 +1886,8 @@ function selfTest() {
 
     // 39 인터뷰 지시문·게이트 규칙·도구 설명이 새 장치를 싣는다(SKILL 을 안 읽는 호스트도 같은 지시)
     const desc39 = JSON.stringify(TOOLS.find((t) => t.name === 'searchflow_start').inputSchema);
-    ok('지시문: 인터뷰에 ⑤ 마감 시한 · «자동 모드» 보기 · 스키마에 origin·origin_reason·auto_mode · 원래 말 필수 안내',
-       INTERVIEW_FRAME.includes('⑤ 마감 시한') && INTERVIEW_FRAME.includes('자동 모드') &&
+    ok('지시문: 인터뷰·게이트 규칙에 ⑤ 마감 시한 · 자동 모드 칸 줄 · 스키마에 origin·origin_reason·auto_mode · 원래 말 필수 안내',
+       INTERVIEW_FRAME.includes('⑤ 마감 시한') && INTERVIEW_FRAME.includes(AUTO_SLOT_LINE) && GATE_RULES.includes(AUTO_SLOT_LINE) &&
        desc39.includes('"origin"') && desc39.includes('"origin_reason"') && desc39.includes('"auto_mode"') && desc39.includes('"deadline_quote"') && GATE_RULES.includes('original_question'),
        '');
   } finally {
