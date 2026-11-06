@@ -549,7 +549,7 @@ const nfc = (s) => String(s ?? '').normalize('NFC');
 //   [from-safe-default](ouroboros 가 생성 출처로 분류). 표지는 생성처가 쓰는 소문자 그대로만(«[FROM-AUTO]»·«[From-Auto]» = 사람 답 — ouroboros 분류는 대소문자를
 //   무시하지만 여기선 끄는 쪽). 표지 앞에는 빈칸·탭·줄바꿈만 허용한다(BOM·폭 없는 글자·전각 괄호·NBSP 가 붙으면 사람 답 — 끄는 쪽).
 //   [from-user] 는 ouroboros 인터뷰 규약에서 사람 답에 붙는 표지라 사람 답이다 — 칸 답이면 맨 앞 하나를 떼고 «예»를 본다. 그 밖의 [from-…] 머리도 사람 답(끄는 쪽).
-const AUTO_INVISIBLE_RE = /[​-‍⁠﻿­]/g;
+const AUTO_INVISIBLE_RE = /[\u200B-\u200D\u2060\uFEFF\u00AD]/g;
 const AUTO_DEADLINE_WORD_RE = /마감|시한|기한|데드라인|납기|기일|언제까지|\bdeadlines?\b|\bdue\b|\bETA\b|\bcut-?off\b/i;
 // 칸 경로의 시한 표지 낱말(원래 말에만 쓴다) — 시한 꼴 목록(DEADLINE_SHAPES)은 «12월까지»·«다음 달까지»·«금주 중으로»·«연내로»·«발표 전까지»·«by the 10th»·
 // «before the weekend» 같은 흔한 시한을 놓쳤다(0.55.13 독립 검증). 원래 말에 이 표지 낱말이 하나라도 있으면 자동 모드를 끈다 — «국내에서»·«지금까지»·«범위 내에서»·
@@ -579,6 +579,7 @@ function autoSlotAnswer(rounds) {
   rs.forEach((r, i) => { if (typeof r.question === 'string' && autoSlotKey(r.question) === key) k = i; });
   if (k < 0) return false;
   const ans = rs[k].user_response;
+  if (ans.length > 64) return false; // 칸 답은 «예» 한 낱말 — 긴 글은 끝 문장부호 떼기 전에 끔(긴 «.» 줄에서 떼기가 느려지는 것 막음)
   // 칸 답: 봇 표지면 끔 · 사람 답 표지 [from-user] 하나만 떼고 «예» 한 낱말인지 본다([from-user][refined] 예 · [from-code] 예 = 끔).
   if (AUTO_BOT_ROUND_RE.test(ans) || !AUTO_YES_RE.test(autoNorm(ans).replace(AUTO_USER_HEAD_RE, '').replace(/[.!~。]+$/, '').trim())) return false;
   // 사람 답 = 칸 «예» 하나뿐(칸 앞·뒤의 [from-user]·머리 없는 답·다시 물은 칸의 답이 있으면 끔). 봇 표지 검사는 원래 글자 그대로 한다(정규화하면 BOM·전각 괄호 머리가 봇이 된다).
