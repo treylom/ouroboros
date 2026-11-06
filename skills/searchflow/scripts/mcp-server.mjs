@@ -329,7 +329,7 @@ const TOOLS = [
         // ⚠️ 예시에 숫자를 쓰지 않는다 — 워커가 보는 표면의 숫자는 전부 심판이 붙잡을 앵커가 된다.
         //    첫 판에 "20 minutes from now" 를 넣었다가 말뭉치 수 토큰에 20 이 새로 생겼다(위반은 아니나 불필요).
         deadline_source: { type: 'string', enum: ['operator', 'default'], description: 'Where the deadline came from: the operator answered, or the default (start + thirty minutes) was used. Omitted means default. For research a person asked for (gate.origin human, the default), default is refused unless auto mode applies — ask the deadline in the same operator interview as the other unclear items, then send operator.' },
-        deadline_quote: { type: 'string', description: 'For research a person asked for, when deadline_source is operator and no operator interview took place: the deadline phrase copied verbatim from original_question. A deadline set by a bot or an upstream instruction is not operator.' },
+        deadline_quote: { type: 'string', description: 'For research a person asked for, when deadline_source is operator and no operator interview took place: the deadline phrase copied verbatim from original_question (at most 40 characters, shaped like a deadline: a day, clock time, duration or date with a marker such as 까지/전/안에, e.g. «오늘 18시까지», «3일 안에», «11월 10일 전에», «11/10», «by Friday»; a bare fragment such as «까지» or «오후», a year, or the end of a «…부터 …까지» range is refused). A deadline set by a bot or an upstream instruction is not operator.' },
         deadline: { type: 'string', description: 'Wall-clock cutoff to hand each worker, as a plain phrase. Workers return partial results at the cutoff.' },
         type: { type: 'string', enum: Object.keys(TYPES), description: 'Optional. Pin the research type instead of deriving it from the question text. Omit to route normally.' },
         gate: {
@@ -359,7 +359,7 @@ const TOOLS = [
             origin: { type: 'string', enum: ['human', 'bot'], description: 'Who asked for this research. Omitted means human. human = a person asked (their own words go in original_question). bot = the bot started it on its own with no person asking (a schedule, a self-check); requires origin_reason.' },
             origin_reason: { type: 'string', description: 'Required when origin is bot: one line saying why no person asked for this research. Empty or multi-line is refused.' },
             original_question: { type: 'string', description: 'Required when origin is human (the default): the person\'s own words, verbatim, as first received — not your rewrite. Grade initial_verdicts on these words. If question differs from these words, the operator interview is required.' },
-            auto_mode: { type: 'boolean', description: 'Optional. Auto mode lets the bot answer the remaining interview items itself until the interview is clear enough, and allows the default deadline. The server grants it only when the person\'s own words (original_question) say «자동 모드», or the operator answered «자동 모드» in the interview. Sending true without that basis is refused.' },
+            auto_mode: { type: 'boolean', description: 'Optional. Auto mode lets the bot answer the remaining interview items itself until the interview is clear enough, and allows the default deadline. The server grants it only when the person\'s own words (original_question) or the operator\'s interview answer ask for it in request form («자동 모드로 해 줘», «자동 모드요», «auto mode please»); a negation in the same or the next clause («자동 모드가 아니라 …», «no auto mode») or a topic use («세탁기 자동 모드 세탁 시간») does not count. Sending true without that basis is refused.' },
             initial_verdicts: {
               type: 'object',
               description: 'Required. The first grading, before any operator interview (same as verdicts when the question was clear from the start). Any X here means the operator interview was required.',
@@ -508,7 +508,7 @@ function interviewContextBlock(originalQuestion) {
 // 인터뷰 끝(searchflow_start)과 첫 질문 전달 전(searchflow_await_operator) 두 곳에서 같은 식으로 본다.
 function checkInterviewContext(iv, oq0) {
   const how = `ouroboros_interview 를 새로 열 때 initial_context 에는 아래 글을 한 글자도 바꾸지 말고 그대로 넣는다:\n${interviewContextBlock(oq0)}`;
-  const lines = String(iv.initial_context ?? '').replace(/^\s+/, '').split(/\r?\n/);
+  const lines = nfc(iv.initial_context).replace(/^\s+/, '').split(/\r?\n/);
   if (lines[0].replace(/\s+$/, '') !== `원질문: ${quoteQuestion(oq0)}`)
     throw new Error(`인터뷰 initial_context 첫 줄이 이 원질문이 아니다 — 첫 줄은 «원질문: <원질문의 JSON 문자열>» 이어야 한다. 다른 질문의 인터뷰는 쓸 수 없다.\n${how}`);
   const squash = (s) => String(s).replace(/\s+/g, ' ').trim();
@@ -524,8 +524,8 @@ const GATE_RULES = [
   '㉮ 지시대명사 세칙: 문면 안에서 선행 지시 대상이 해소되지 않는 지시대명사(「이거·그거·이들」) = ② X 고정 — 수신자가 발주자 머릿속 컨텍스트를 공유한다고 가정하지 않는다(추론 해소 ❌).',
   '내부 미지 구분: 조사로 밝힐 대상의 «내부 미지»(예: 어느 요금제가 있는지)는 게이트 트리거가 아니다 — 발주가 그 미지를 조사 과제로 지정했으면 O.',
   '원래 말 기준(사람이 시킨 조사 · gate.origin 생략 = human): gate.original_question 에 사람이 처음 한 말을 글자 그대로 넣는다(봇이 다시 쓴 지시문 ❌). 첫 채점 gate.initial_verdicts 는 그 원래 말을 채점한다. 질문(question)이 원래 말과 다르면 운영자 인터뷰가 필수다 — 인터뷰 없이 통과하는 길은 question = original_question 하나뿐. 원래 말에 지시대명사(이거·그거·이걸·이들 등)가 있으면 첫 채점 ② = X(㉮ — 서버가 원래 말에서 직접 검사 · 선행 대상이 문면에 있는지는 서버가 못 가려 보수적으로 거부한다 — 비용은 운영자 질문 1회). 사람이 시키지 않은 봇 자체 조사만 gate.origin = bot + gate.origin_reason(근거 1줄)로 면제된다.',
-  '마감 시한: 사람이 시킨 조사에서 시한을 사람이 안 정했으면(deadline_source = default) 기본값으로 넘기지 않는다 — 같은 운영자 인터뷰(⑤ 마감 시한)에서 함께 묻고 deadline_source = operator 로 낸다. 인터뷰 없이 operator 로 내려면 원래 말 속 시한 구절(«까지·마감·오늘·N시» 같은 시한 낱말이 든 짧은 구절)을 deadline_quote 에 글자 그대로 넣는다(봇·상위 지시가 정한 시한은 operator 가 아니다).',
-  '자동 모드: 원래 말에 «자동 모드»가 있거나 운영자가 인터뷰에서 «자동 모드»를 고르면, 남은 인터뷰 질문은 봇이 스스로 답을 채워 인터뷰 모호도가 통과선 아래로 내려갈 때까지 이어 가고(인터뷰 완료 검사는 그대로), 시한은 기본값을 써도 되고 시한 인용(deadline_quote)도 요구하지 않는다. 봇이 쓴 question 에 적힌 «자동 모드»는 근거가 아니고, «자동 모드 말고·쓰지 마»처럼 바로 뒤가 부정이면 세지 않는다.',
+  '마감 시한: 사람이 시킨 조사에서 시한을 사람이 안 정했으면(deadline_source = default) 기본값으로 넘기지 않는다 — 같은 운영자 인터뷰(⑤ 마감 시한)에서 함께 묻고 deadline_source = operator 로 낸다. 인터뷰 없이 operator 로 내려면 원래 말 속 시한 구절을 deadline_quote 에 글자 그대로 넣는다 — 날·시각·기간·날짜에 «까지·전·안에» 같은 표지가 붙은 40자 이하 구절(«오늘 18시까지»·«3일 안에»·«11월 10일 전에»·«11/10»·«이번 달 말»·«by Friday»). «까지»·«오후»·«요일» 같은 조각 단독, 연도+까지(«2025년까지»), 표지 없는 연도 날짜(기준일), «…부터 …까지» 의 뒷부분은 받지 않는다(봇·상위 지시가 정한 시한은 operator 가 아니다).',
+  '자동 모드: 원래 말에 «자동 모드»가 있거나 운영자가 인터뷰에서 «자동 모드»를 고르면, 남은 인터뷰 질문은 봇이 스스로 답을 채워 인터뷰 모호도가 통과선 아래로 내려갈 때까지 이어 가고(인터뷰 완료 검사는 그대로), 시한은 기본값을 써도 되고 시한 인용(deadline_quote)도 요구하지 않는다. 봇이 쓴 question 에 적힌 «자동 모드»는 근거가 아니다. 켜는 꼴 = «자동 모드»(«자동모드»·«오토 모드»·«auto mode») 뒤가 비었거나 요청 낱말(로 해·진행해·할게요·please 등)뿐인 절(«자동 모드로 해 줘»·«자동 모드요»). 그 절이나 바로 다음 절에 부정 낱말(아니·안·말고·싫·원치·no·don\'t 등)이 하나라도 있으면 끈다(«안 묻고·묻지 말고»는 자동 모드를 거드는 말이라 예외). «세탁기 자동 모드 세탁 시간» 같은 주제어 쓰임·«반자동 모드»는 켜지 않는다.',
   '통과 = 4항목 전부 O(점수 = 명확도, 높을수록 명확). 하나라도 X = 조사 시작 ❌ — 지금 ouroboros_interview 를 시작해(' + INTERVIEW_CONTEXT_HOW + ') 인터뷰가 낸 질문을 운영자에게 하나도 빠짐없이 그대로 전달한다(창구 사다리 SKILL.md §4 · 대기 시간 상한 없음 · 봇이 대신 답하지 않는다). 인터뷰가 완료되면 다듬은 질문을 다시 채점하고 gate.operator_clarification(interview_session_id 포함)을 함께 제출한다. 첫 채점 gate.initial_verdicts 는 언제나 함께 낸다.',
   INTERVIEW_FRAME,
 ].join('\n');
@@ -533,21 +533,82 @@ const GATE_RULES = [
 // ㉮ 지시대명사 — 원래 말(사람 글)에서만 본다. 앞 글자가 한글이면 낱말 가운데(«사과이거나»)라 세지 않는다.
 // 문면 안 선행 대상 해소 여부는 서버가 못 가린다 — 오검출 비용은 운영자 질문 1회라 보수적으로 잡는다.
 const DEICTIC_RE = /(?<![가-힣])(?:이거|그거|저거|요거|이것|그것|저것|이건|그건|저건|이게|그게|저게|이걸|그걸|저걸|이들)/;
-// 자동 모드 표지 — 사람 글(원래 말 · 인터뷰 운영자 답)에서만 근거로 센다. 바로 뒤가 부정(«말고·쓰지 마·아니» 등)이면 세지 않는다.
-const AUTO_MODE_RE = /자동\s*모드|auto[\s_-]*mode/gi;
-const AUTO_NEG_RE = /^\s*(?:는|은|로|으로|를|을)?\s*(?:말고|아니|안\s|쓰지|하지\s*마|하지\s*말|싫|없이|빼고|금지|no\b|off\b)/i;
+// 사람 글은 NFC 로 맞춘 뒤 본다 — NFD(자모 분리) 글은 한글 낱말 검사(지시대명사·자동 모드·시한 구절)를 모두 지나갔다(0.55.13).
+const nfc = (s) => String(s ?? '').normalize('NFC');
+// 자동 모드 표지 — 사람 글(원래 말 · 인터뷰 운영자 답)에서만 근거로 센다(0.55.13 보수판 · 오판 비용 = 운영자 질문 1회라 끄는 쪽으로 기운다).
+// 켬 = «자동 모드»(«자동모드»·«오토 모드»·«auto mode» 포함 · 앞이 낱말 가운데 = «반자동 모드» ❌ · 뒤가 영문 낱말 = «auto-moderation» ❌) 뒤가
+//      비었거나 요청 낱말(로 해·진행해·할게요·please…)뿐인 절이 있고,
+// 끔 = 그런 표지가 든 절이나 바로 다음 절에 부정 낱말이 하나라도 있으면(«…가 아니라»·«쓰면 안 돼»·«no auto mode»·«자동 모드, 쓰지 마»·
+//      «자동 모드로 해. 아니, …»·이중 부정 «아니면 안 돼»도 끔). 주제어 쓰임(«세탁기 자동 모드 세탁 시간»)은 뒤에 요청 낱말 밖의 말이 있어 안 켠다.
+// «안 묻고·묻지 말고·질문 없이»는 자동 모드를 거드는 말이라 부정 검사 전에 지운다(«자동 모드로 안 묻고 진행해» = 켬).
+const AUTO_MENTION_RE = /(?<![가-힣A-Za-z])(?:자동|오토)\s*모드|(?<![A-Za-z-])auto[\s_-]*mode(?![A-Za-z])/gi;
+const AUTO_CLAUSE_SPLIT_RE = /[.!?。！？;；,，、…\r\n\u000b\u000c\u001c-\u001e\u0085\u2028\u2029]+/;
+const AUTO_NO_ASK_RE = /(?:(?:나|저|제)(?:한테|에게|게)\s*)?(?:안\s*(?:묻고|물어\s*보고)|(?:묻|물어\s*보)지\s*(?:말고|않고)|질문\s*없이|확인\s*없이)|\bwithout\s+asking\b|\bdon'?t\s+ask(?:\s+me)?\b|\bno\s+questions?\b/gi;
+const AUTO_NEG_RE = /말고|말아|말자|지\s*마(?:세요|십시오|라|요)?(?![가-힣])|않|(?<![가-힣])안(?=\s|$|돼|되|해|써|씀|함|할)|아니|아냐|싫|원치|원하지|없이|빼고|금지|그만|취소|끄|꺼|못|\bno\b|\bnot\b|n't\b|\bnever\b|\bwithout\b|\bavoid|\bstop\b|\bdisable|\boff\b/i;
+const AUTO_TAIL_PARTICLE_RE = /^(?:으로요|로요|으로|로|를|을|이요|요)/;
+const AUTO_TAIL_WORDS = new Set(('해 해요 해줘 해주세요 해주십시오 하자 합시다 하세요 해라 할게 할게요 할래 할래요 하겠습니다 해도 돼 돼요 됩니다 ' +
+  '진행 진행해 진행해요 진행해줘 진행해주세요 진행하자 진행합시다 진행하세요 진행할게요 돌려 돌려줘 돌려요 돌려주세요 가 가자 가요 갑시다 갈게요 ' +
+  '켜 켜줘 켜요 켜주세요 써 써줘 써요 써주세요 쓰자 씁시다 사용 사용해 사용해줘 사용해주세요 부탁 부탁해 부탁해요 부탁합니다 부탁드려요 부탁드립니다 ' +
+  '원해 원해요 원합니다 좋아 좋아요 좋습니다 끝까지 알아서 좀 줘 주세요 주십시오 줄래 줄래요 please pls plz on ok okay').split(' '));
 function saysAutoMode(text) {
-  for (const m of String(text).matchAll(AUTO_MODE_RE))
-    if (!AUTO_NEG_RE.test(String(text).slice(m.index + m[0].length, m.index + m[0].length + 12))) return true;
-  return false;
+  const clauses = nfc(text).split(AUTO_CLAUSE_SPLIT_RE).map((c) => c.replace(AUTO_NO_ASK_RE, ' '));
+  let on = false;
+  for (let i = 0; i < clauses.length; i++) {
+    const ms = [...clauses[i].matchAll(AUTO_MENTION_RE)];
+    if (!ms.length) continue;
+    if (AUTO_NEG_RE.test(clauses[i]) || AUTO_NEG_RE.test(clauses[i + 1] ?? '')) return false; // 부정 표지가 하나라도 있으면 전체 끔
+    for (const m of ms) {
+      const tail = clauses[i].slice(m.index + m[0].length).trim().replace(AUTO_TAIL_PARTICLE_RE, '');
+      if (tail.split(/\s+/).filter(Boolean).every((w) => AUTO_TAIL_WORDS.has(w.toLowerCase()))) on = true;
+    }
+  }
+  return on;
 }
-// 시한 구절 모양 — 원래 말에 «있기만» 한 아무 조각(한 글자 · 연도 숫자 · 원래 말 전체)을 시한 근거로 받지 않는다.
-const DEADLINE_SHAPE_RE = /까지|마감|시한|오늘|내일|모레|자정|정오|오전|오후|요일|이번\s*주|다음\s*주|\d+\s*시|\d{1,2}:\d{2}|\d+\s*분\s*(?:안|내|뒤|후)|until|by\s|deadline|today|tomorrow|tonight|\bEOD\b|\d\s*(?:am|pm)\b/i;
+// 시한 구절 모양(0.55.13) — 원래 말에 «있기만» 한 조각(한 글자 · 연도 · «까지»·«요일»·«오후» 단독 · 원래 말 전체)은 시한 근거가 아니다.
+// 받는 꼴: 날+표지(«오늘까지»·«금요일 전에») · 날/오전·오후+시각(«오늘 18시»·«오후 3시») · 시각+표지(«18시까지»·«18:00 전») ·
+// 기간형(«3일 안에»·«일주일 내»·«사흘 안에»·«2시간 이내») · 연도 없는 날짜(«11월 10일»·«11/10») · 연도 날짜+표지(«2026-11-10까지») ·
+// 월말형(«이번 달 말»·«월말») · 영문(«by Friday»·«within 2 days»·«EOD»). 시각의 «시» 뒤가 한글이면 표지만 받는다(«3시리즈» ❌).
+// 원래 말에서 인용 바로 앞(같은 절)에 «부터·~·from» 이 있으면 기간의 끝이라 받지 않는다(«11월 1일부터 11월 10일까지»).
+const DL_MARK = '(?:까지|전에|전까지|이전|안에|안으로|내에|내로|이내|중으로|중에|만에|마감|(?:전|안|내|중)(?![가-힣]))';
+const DL_DAY = '(?:오늘|금일|내일|명일|모레|글피|(?:이번|다음)\\s*주(?:\\s*[월화수목금토일]요일)?|[월화수목금토일]요일)';
+const DL_PART = '(?:오전|오후|아침|저녁|밤|낮|새벽)';
+const DL_HOUR = '\\d{1,2}\\s*시(?:\\s*\\d{1,2}\\s*분|\\s*반)?';
+const DL_EN_DAY = '(?:mon|tues?|wed(?:nes)?|thu(?:rs?)?|fri|sat(?:ur)?|sun)(?:day)?';
+const DEADLINE_SHAPES = [
+  `${DL_DAY}\\s*(?:${DL_PART}\\s*)?${DL_MARK}`,
+  `(?:${DL_DAY}|${DL_PART})\\s*(?:${DL_PART}\\s*)?(?:${DL_HOUR}(?![가-힣])|${DL_HOUR}\\s*${DL_MARK}|(?<!\\d)\\d{1,2}:\\d{2}(?!\\d))`,
+  `${DL_HOUR}\\s*(?:${DL_MARK}|정각)`,
+  `(?<![\\d:])\\d{1,2}:\\d{2}(?![\\d:])\\s*${DL_MARK}`,
+  `(?:${DL_DAY}\\s*)?(?:자정|정오)\\s*${DL_MARK}|${DL_DAY}\\s*(?:자정|정오)`,
+  `(?:\\d+\\s*(?:분|시간|일|주일|주|개월|달)|하루|이틀|사흘|나흘|닷새|엿새|이레|열흘|보름|반나절|일주일|(?:한|두|세)\\s*(?:주|달|시간)|반\\s*시간)\\s*(?:안에|안으로|내에|내로|이내|만에|(?:안|내)(?![가-힣]))`,
+  `(?<!\\d\\s*년\\s*)(?<![\\d./-])\\d{1,2}\\s*월\\s*\\d{1,2}\\s*일`,
+  `(?<![\\d./-])\\d{1,2}\\s*\\/\\s*\\d{1,2}(?![\\d/])`,
+  `(?<![\\d월\\s])\\d{1,2}\\s*일\\s*(?:까지|전에|전까지|이전)`,
+  `\\d{4}\\s*(?:년\\s*\\d{1,2}\\s*월\\s*\\d{1,2}\\s*일|[-./]\\s*\\d{1,2}\\s*[-./]\\s*\\d{1,2})\\s*${DL_MARK}`,
+  `(?:이번|다음)\\s*달\\s*(?:말|초|안|내|중)(?:까지|에|으로)?(?![가-힣])|이달\\s*(?:말|안|내|중)(?:까지|에|으로)?(?![가-힣])|(?<![가-힣])월말(?:까지|에|전에|전)?(?![가-힣])|(?:주말|연말)\\s*${DL_MARK}`,
+  `(?:마감|시한|기한)\\s*[:：은는이]?\\s*(?:${DL_DAY}|\\d{1,2}\\s*월\\s*\\d{1,2}\\s*일|\\d{1,2}\\s*\\/\\s*\\d{1,2})`,
+  '\\b(?:EOD|EOW|COB|EOB)\\b',
+  `\\b(?:by|before|until|till|due|no\\s+later\\s+than)\\s+(?:today|tonight|tomorrow|noon|midnight|eod|eow|cob|end\\s+of\\s+(?:the\\s+)?(?:day|week|month)|(?:this|next)\\s+(?:week|weekend|month|${DL_EN_DAY})|${DL_EN_DAY}|\\d{1,2}(?::\\d{2})?\\s*(?:am|pm)|\\d{1,2}:\\d{2}|\\d{1,2}\\/\\d{1,2}|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\\.?\\s+\\d{1,2})\\b`,
+  '\\b(?:within|in)\\s+(?:\\d+|an?|one|two|three)\\s*(?:min(?:ute)?s?|hours?|hrs?|days?|weeks?)\\b',
+].map((s) => new RegExp(s, 'i'));
+const DL_RANGE_BEFORE_RE = /(?:부터|~|∼|〜|～|\bfrom\b|\bbetween\b|\bsince\b)/i;
+// 인용이 시한 구절이 아니면 그 이유(문자열), 맞으면 ''.
+function deadlineShapeProblem(dq, oq) {
+  if (dq.length > DEADLINE_QUOTE_MAX) return `${DEADLINE_QUOTE_MAX}자를 넘는다`;
+  if (!DEADLINE_SHAPES.some((re) => re.test(dq))) return '시한 꼴(날·시각·기간·날짜 + «까지·전·안에» 같은 표지)이 없다';
+  // 인용이 원래 말에 나오는 자리 가운데 하나라도 «…부터» 기간의 끝이 아니면 받는다(같은 절 안 앞 16자).
+  for (let at = oq.indexOf(dq); at !== -1; at = oq.indexOf(dq, at + 1)) {
+    const before = oq.slice(Math.max(0, at - 16), at).split(/[,.;!?\n]/).pop();
+    if (!DL_RANGE_BEFORE_RE.test(before)) return '';
+  }
+  return '기간의 끝이다(원래 말에서 바로 앞에 «부터»·«~»가 있다 — 조사 대상 기간이지 마감이 아니다)';
+}
 const DEADLINE_QUOTE_MAX = 40;
 // 여러 줄 판정 = 줄을 나누는 글자 전부(32c 의 줄 나눔 셈과 같은 집합).
 const LINE_BREAK_RE = /[\r\n\u000b\u000c\u001c-\u001e\u0085\u2028\u2029]/;
 
-function gateCheck(gate, question, deadlineSource = 'default', deadlineQuote) {
+function gateCheck(gate, question0, deadlineSource = 'default', deadlineQuote) {
+  const question = nfc(question0).trim();
   if (!gate || typeof gate !== 'object') {
     throw new Error(
       'P-1 모호도 게이트 미통과 — searchflow_start 는 gate 인자 없이 P0 로 진입하지 않는다.\n' +
@@ -577,14 +638,14 @@ function gateCheck(gate, question, deadlineSource = 'default', deadlineQuote) {
     if (!originReason || LINE_BREAK_RE.test(originReason))
       throw new Error('gate.origin = bot 면제에는 gate.origin_reason(사람이 시키지 않은 이유 1줄)이 필요하다 — 비었거나 여러 줄이면 받지 않는다. 사람이 시킨 조사면 origin 을 빼고 gate.original_question 에 사람의 원래 말을 넣어라.');
   }
-  const oqRaw = typeof gate.original_question === 'string' ? gate.original_question.trim() : '';
+  const oqRaw = typeof gate.original_question === 'string' ? nfc(gate.original_question).trim() : '';
   if (origin === 'human' && !oqRaw)
     throw new Error('P-1 게이트: 사람이 시킨 조사에는 사람의 원래 말이 필요하다 — gate.original_question 에 사람이 처음 한 말을 글자 그대로 넣어라(봇이 다시 쓴 지시문 ❌). 첫 채점 gate.initial_verdicts 는 그 원래 말을 채점하고, question 이 원래 말과 다르면 운영자 인터뷰가 필요하다. 사람이 시키지 않은 봇 자체 조사면 gate.origin = bot + gate.origin_reason(근거 1줄).');
   const failed = GATE_ITEMS.filter((k) => v[k] === 'X');
   if (failed.length) {
     // 인터뷰 시작 문맥은 서버가 조립해 준다 — 호스트에게 긴 지시문을 베끼게 하면 SKILL 없는 호스트가 자기 말로 줄여
     // 넣었고(0.55.7 실측 · Claude 호스트), 그 인터뷰는 끝에서 거부돼 운영자 왕복을 버리게 된다.
-    const oqNow = (typeof gate.original_question === 'string' && gate.original_question.trim()) || String(question).trim();
+    const oqNow = oqRaw || question;
     // 원질문은 블록 안에 1벌만 싣는다 — 지시 줄에 한 번 더 되돌리면 원질문이 서버 글에 두 번 들어가 가짜 줄을 만들 자리가 는다(5차 보안).
     throw new Error(
       `P-1 게이트 발동 — 미달 항목: ${failed.map((k) => GATE_ITEM_KO[k]).join(' · ')}.\n조사 시작 ❌ — 지금 ouroboros_interview 를 시작해 그 질문을 운영자에게 전달하라(창구 사다리 SKILL.md §4 · 대기 시간 상한 없음). 봇이 대신 답하지 않는다.\n` +
@@ -610,7 +671,7 @@ function gateCheck(gate, question, deadlineSource = 'default', deadlineQuote) {
       `ouroboros_interview 의 initial_context 에는 아래 ${CTX_BEGIN} 와 ${CTX_END} 사이 글을 한 글자도 바꾸지 말고 그대로 넣는다.\n` +
       `${interviewContextBlock(oq)}\n${GATE_RULES}`,
     );
-  const needOC = !!(iv0 && GATE_ITEMS.some((k) => iv0[k] === 'X')) || (!!oq && oq !== String(question).trim());
+  const needOC = !!(iv0 && GATE_ITEMS.some((k) => iv0[k] === 'X')) || (!!oq && oq !== question);
   const oc = gate.operator_clarification;
   const OC_KEYS = ['interview_session_id', 'asked_via', 'asked_at', 'answered_at', 'answer_summary'];
   let ocOut, interview;
@@ -631,7 +692,7 @@ function gateCheck(gate, question, deadlineSource = 'default', deadlineQuote) {
     // 머리는 지시문 조각·짧은 앞부분으로 다른 질문의 인터뷰를 통과시켰다).
     // 둘째 줄부터는 검색 인터뷰 지시문 «전문»과 같아야 한다(공백·줄바꿈 차이만 무시). 표지로 «시작»만 보면, 날 따옴표로
     // 적은 긴 원질문의 뒷부분이 표지 글자로 이어질 때 짧은 다른 원질문의 인터뷰로 통과했다(3차 보안 F·G·H / T3).
-    checkInterviewContext(iv, oq || String(question).trim());
+    checkInterviewContext(iv, oq || question);
     const autoAnswer = (Array.isArray(iv.rounds) ? iv.rounds : [])
       .some((r) => r && typeof r.user_response === 'string' && saysAutoMode(r.user_response));
     interview = { ambiguity_score: iv.ambiguity_score, answered_rounds: answered, status: iv.status, auto_answer: autoAnswer };
@@ -641,7 +702,7 @@ function gateCheck(gate, question, deadlineSource = 'default', deadlineQuote) {
     throw new Error(
       'P-1 게이트: 운영자 인터뷰 근거가 필요하다 — gate.operator_clarification{interview_session_id, asked_via, asked_at, answered_at, answer_summary} 를 함께 제출하라. 봇이 혼자 다듬은 질문은 받지 않는다(question 이 원래 말과 다르면 인터뷰 필수).\n' +
       `조사 시작 ❌ — 지금 ouroboros_interview 를 시작해 그 질문을 운영자에게 전달하라(창구 사다리 SKILL.md §4). initial_context 에는 아래 ${CTX_BEGIN} 와 ${CTX_END} 사이 글을 한 글자도 바꾸지 말고 그대로 넣는다.\n` +
-      `${interviewContextBlock(oq || String(question).trim())}\n${GATE_RULES}`,
+      `${interviewContextBlock(oq || question)}\n${GATE_RULES}`,
     );
   // 자동 모드 근거 = 사람 글뿐: 원래 말 또는 인터뷰의 운영자 답. 봇이 쓴 question 은 근거가 아니다.
   let autoBasis;
@@ -663,10 +724,11 @@ function gateCheck(gate, question, deadlineSource = 'default', deadlineQuote) {
   // 봇이 상위 지시·자기 판단으로 정한 시한을 operator 로 신고하던 실사용 꼴을 막는다(자동 모드는 시한 기본값도 허용하니 제외).
   let dq;
   if (origin === 'human' && deadlineSource === 'operator' && !ocOut && !autoBasis) {
-    dq = typeof deadlineQuote === 'string' ? deadlineQuote.trim() : '';
-    if (!dq || !oq.includes(dq) || dq.length > DEADLINE_QUOTE_MAX || !DEADLINE_SHAPE_RE.test(dq))
+    dq = typeof deadlineQuote === 'string' ? nfc(deadlineQuote).trim() : '';
+    const shape = dq && oq.includes(dq) ? deadlineShapeProblem(dq, oq) : '';
+    if (!dq || !oq.includes(dq) || shape)
       throw new Error(
-        'P-1 게이트: deadline_source = operator 인데 시한을 사람이 정한 근거가 없다 — 운영자 인터뷰도 없고, 원래 말 속 시한 구절 인용(deadline_quote)도 ' + (!dq ? '없다' : (!oq.includes(dq) ? '원래 말에 없는 글이다' : `시한 구절이 아니다(«까지·마감·오늘·N시» 같은 시한 낱말이 든 ${DEADLINE_QUOTE_MAX}자 이하 구절)`)) + '. 원래 말에 시한이 있으면 그 구절을 deadline_quote 에 글자 그대로 넣고, 없으면 지금 ouroboros_interview 를 시작해 ⑤ 마감 시한을 운영자에게 묻는다(봇·상위 지시가 정한 시한은 operator 가 아니다).\n' +
+        'P-1 게이트: deadline_source = operator 인데 시한을 사람이 정한 근거가 없다 — 운영자 인터뷰도 없고, 원래 말 속 시한 구절 인용(deadline_quote)도 ' + (!dq ? '없다' : (!oq.includes(dq) ? '원래 말에 없는 글이다' : `시한 구절이 아니다 — ${shape}(받는 꼴: «오늘 18시까지»·«3일 안에»·«11월 10일 전에»·«11/10»·«이번 달 말»·«by Friday» 같은 ${DEADLINE_QUOTE_MAX}자 이하 구절)`)) + '. 원래 말에 시한이 있으면 그 구절을 deadline_quote 에 글자 그대로 넣고, 없으면 지금 ouroboros_interview 를 시작해 ⑤ 마감 시한을 운영자에게 묻는다(봇·상위 지시가 정한 시한은 operator 가 아니다).\n' +
         `ouroboros_interview 의 initial_context 에는 아래 ${CTX_BEGIN} 와 ${CTX_END} 사이 글을 한 글자도 바꾸지 말고 그대로 넣는다.\n` +
         `${interviewContextBlock(oq)}\n${GATE_RULES}`,
       );
@@ -681,7 +743,7 @@ function gateCheck(gate, question, deadlineSource = 'default', deadlineQuote) {
     verdicts: { ...v },
     evidence: Object.fromEntries(GATE_ITEMS.map((k) => [k, String(ev[k]).trim()])),
     initial_verdicts: iv0 ? Object.fromEntries(GATE_ITEMS.map((k) => [k, iv0[k]])) : undefined,
-    original_question: gate.original_question ? String(gate.original_question) : undefined,
+    original_question: gate.original_question ? nfc(gate.original_question) : undefined,
     self_interview_rounds: rounds,
     operator_clarification: ocOut,
     interview,
@@ -1586,15 +1648,21 @@ function selfTest() {
     const m35a = rej({ question: '정기 점검 질문', salt: 't35a', deadline_source: 'default', gate: { ...G4, origin: 'bot' } });
     const m35b = rej({ question: '정기 점검 질문', salt: 't35b', deadline_source: 'default', gate: { ...G4, origin: 'bot', origin_reason: '   ' } });
     const m35c = rej({ question: '정기 점검 질문', salt: 't35c', deadline_source: 'default', gate: { ...G4, origin: 'bot', origin_reason: '첫 줄\n둘째 줄' } });
-    const m35v = ['첫 줄\u000b둘째', '첫 줄\u000c둘째', '첫 줄\u001e둘째'].map((r, i) => rej({ question: '정기 점검 질문', salt: `t35v${i}`, deadline_source: 'default', gate: { ...G4, origin: 'bot', origin_reason: r } }));
+    // 줄 나눔 글자 = LINE_BREAK_RE 전부(\u001c·\u001d 포함 — 0.55.13 · 빠지면 시험이 못 잡았다)
+    const m35v = ['첫 줄\u000b둘째', '첫 줄\u000c둘째', '첫 줄\u001c둘째', '첫 줄\u001d둘째', '첫 줄\u001e둘째', '첫 줄\u0085둘째', '첫 줄\u2028둘째', '첫 줄\u2029둘째', '첫 줄\r둘째']
+      .map((r, i) => rej({ question: '정기 점검 질문', salt: `t35v${i}`, deadline_source: 'default', gate: { ...G4, origin: 'bot', origin_reason: r } }));
     const s35 = okStart({ question: '정기 점검 질문', salt: 't35d', gate: { ...G4, origin: 'bot', origin_reason: '매일 아침 점검이 스스로 연 조사' } });
     const p35 = p1Of(s35);
+    // 단언 = 이 거부에만 있는 문구(GATE_RULES 에도 «origin_reason» 이 있어 낱말 단언은 다른 거부에도 맞았다 · 0.55.13)
+    const U35 = 'bot 면제에는 gate.origin_reason(';
     ok('봇 자체 조사: origin bot 근거 없음·빈칸·여러 줄 = 거부 · 근거 1줄 = 통과(원장 origin·origin_reason 기록)',
-       m35a.includes('origin_reason') && m35b.includes('origin_reason') && m35c.includes('origin_reason') && m35v.every((m) => m.includes('origin_reason')) &&
+       m35a.includes(U35) && m35b.includes(U35) && m35c.includes(U35) && m35v.every((m) => m.includes(U35)) &&
        p35?.origin === 'bot' && p35?.origin_reason === '매일 아침 점검이 스스로 연 조사',
        `a=${m35a ? 'rej' : 'PASS'} b=${m35b ? 'rej' : 'PASS'} c=${m35c ? 'rej' : 'PASS'} ok=${s35?.err ?? 'PASS'}`);
 
     // 36 사람이 시킨 조사 + 시한 기본값 = 거부 + 같은 인터뷰로 묻게(블록 동봉) · 인터뷰를 거쳤어도 시한 기본값 = 거부
+    //    단언 = 이 거부에만 있는 문구(«마감 시한» 은 GATE_RULES·인터뷰 지시문에도 있어 모든 거부에 맞았다 · 0.55.13)
+    const U_DL_DEFAULT = '마감 시한을 사람이 정하지 않았다';
     const m36 = rej({ question: OQ_CLEAR, salt: 't36a', deadline_source: 'default', gate: G_H });
     const m36o = rej({ question: OQ_CLEAR, salt: 't36b', deadline_source: undefined, gate: G_H });
     const IV_DL = 'interview_ffff000000000001';
@@ -1602,7 +1670,7 @@ function selfTest() {
     const m36i = rej({ question: '다듬은 시세 질문', salt: 't36c', deadline_source: 'default',
       gate: { ...G4, initial_verdicts: IV_X, original_question: '요즘 시세 알아봐 줘', operator_clarification: { ...oc23, interview_session_id: IV_DL } } });
     ok('마감 시한: 사람이 시킨 조사 + deadline_source default(명시·생략) = 거부 + 인터뷰 블록 · 인터뷰 뒤에도 default = 거부',
-       m36.includes('마감 시한') && m36.includes(interviewContextBlock(OQ_CLEAR)) && m36o.includes('마감 시한') && m36i.includes('마감 시한'),
+       m36.includes(U_DL_DEFAULT) && m36.includes(interviewContextBlock(OQ_CLEAR)) && m36o.includes(U_DL_DEFAULT) && m36i.includes(U_DL_DEFAULT),
        `${m36 ? m36.slice(0, 40) : 'PASS'} | omit=${m36o ? 'rej' : 'PASS'} | iv=${m36i ? 'rej' : 'PASS'}`);
 
     // 37 양성: 원래 말이 명확 + 질문 = 원래 말 + 첫 채점 4항목 O + 시한 operator = 통과 · 원장에 원래 말·origin human
@@ -1637,20 +1705,88 @@ function selfTest() {
     const p38d = p1Of(s38d);
     ok('자동 모드: 원래 말에 있음 = 시한 default 통과(auto_basis original_question) · 봇 질문에만 있음/신고만 = 거부 · 인터뷰에서 고름 = 통과(auto_basis interview)',
        p38a?.auto_mode === true && p38a?.auto_basis === 'original_question' &&
-       m38b.includes('마감 시한') && m38c.includes('auto_mode') && m38n.includes('마감 시한') && m38m.includes('마감 시한') &&
+       m38b.includes(U_DL_DEFAULT) && m38c.includes('gate.auto_mode 근거 없음') && m38n.includes(U_DL_DEFAULT) && m38m.includes(U_DL_DEFAULT) &&
        p38d?.auto_mode === true && p38d?.auto_basis === 'interview',
        `orig=${s38a?.err ?? 'PASS'} botq=${m38b ? 'rej' : 'PASS'} flag=${m38c ? 'rej' : 'PASS'} iv=${s38d?.err ?? 'PASS'}`);
 
     // 40 시한 operator 신고만 = 근거 ❌ — 인터뷰도 없고 원래 말 속 시한 인용(deadline_quote)도 없으면 거부(봇이 정한 시한을
     //    operator 로 신고하던 실사용 꼴) · 인용이 원래 말에 없는 글 = 거부 · 원래 말 글자 그대로 = 통과(37) · 인터뷰 거친 operator = 통과(23)
+    const U_DQ_NONE = '인용(deadline_quote)도 없다', U_DQ_NOTIN = '원래 말에 없는 글이다', U_DQ_SHAPE = '시한 구절이 아니다';
     const m40a = rej({ question: OQ_CLEAR, salt: 't40a', deadline_source: 'operator', gate: G_H });
     const m40b = rej({ question: OQ_CLEAR, salt: 't40b', deadline_source: 'operator', deadline_quote: '내일 9시까지', gate: G_H });
     const m40c = rej({ question: OQ_CLEAR, salt: 't40c', deadline_source: 'operator', deadline_quote: '   ', gate: G_H });
     // 원래 말에 «있기만» 한 아무 조각(한 글자 · 시한 아닌 숫자 · 원래 말 전체) = 시한 구절이 아니다 → 거부
     const m40s = ['시', '2026', OQ_CLEAR].map((dq, i) => rej({ question: OQ_CLEAR, salt: `t40s${i}`, deadline_source: 'operator', deadline_quote: dq, gate: G_H }));
     ok('마감 시한 근거: operator 신고만(인터뷰·원래 말 인용 없음) = 거부 + 인터뷰 블록 · 원래 말에 없는 인용·빈 인용 = 거부',
-       m40a.includes('deadline_quote') && m40a.includes(interviewContextBlock(OQ_CLEAR)) && m40b.includes('deadline_quote') && m40c.includes('deadline_quote') && m40s.every((m) => m.includes('deadline_quote')),
+       // 단언 = 거부 갈래마다 고유 문구(«deadline_quote» 는 GATE_RULES·스키마 안내에도 있어 모든 거부에 맞았다 · 0.55.13)
+       m40a.includes(U_DQ_NONE) && m40a.includes(interviewContextBlock(OQ_CLEAR)) && m40b.includes(U_DQ_NOTIN) && m40c.includes(U_DQ_NONE) && m40s.every((m) => m.includes(U_DQ_SHAPE)),
        `${m40a ? m40a.slice(0, 40) : 'PASS'} | notin=${m40b ? 'rej' : 'PASS'} | blank=${m40c ? 'rej' : 'PASS'} | shape=${m40s.map((m) => (m ? 'rej' : 'PASS')).join(',')}`);
+
+    // 41 자동 모드 판정(0.55.13 · 2회차 검증 S1·M3) — 켜는 꼴 = «자동 모드»(붙여 씀·«오토 모드»·영문 «auto mode» 포함) 뒤가 비었거나
+    //    요청 낱말(로 해·진행해·할게요·please…)뿐일 때. 같은 절이나 바로 다음 절에 부정 낱말이 하나라도 있으면 끔. 주제어 쓰임
+    //    («세탁기 자동 모드 세탁 시간»·«auto-moderation»·«반자동 모드»)은 안 켬. «안 묻고·묻지 말고»는 자동 모드를 거드는 말이라 부정으로 안 셈.
+    //    오판 비용이 «질문 1회»라 이중 부정(«자동 모드 아니면 안 돼»)도 끈다.
+    const AUTO_ON = ['자동 모드로 해 주세요.', '자동모드', 'auto mode', 'AUTO-MODE please', '비교해 줘. 자동 모드로.', '자동 모드', '자동 모드요', '자동 모드로요',
+      '자동 모드로 할게요', '자동 모드로 안 묻고 진행해.', '자동 모드로 안 물어보고 끝까지 해 줘.', '오토 모드로.', 'use auto mode', '범위는 국내만, 나머지는 자동 모드로',
+      // 주제어 «auto-moderation» 은 표지가 아니다 — 그 절의 «No» 가 진짜 요청을 끄면 안 된다(낱말 경계 검사)
+      'Use auto mode. Compare EV sales. No auto-moderation tools.'];
+    const AUTO_OFF = ['자동 모드 쓰면 안 돼.', '자동 모드가 아니라 나한테 직접 물어봐 줘.', 'no auto mode.', "don't use auto mode.", '자동 모드는 원치 않아.',
+      '자동 모드 절대 쓰지 마.', '자동 모드도 싫어.', '자동 모드 쓰면 안 돼요, 제가 답할게요', '자동 모드 쓰지 마.', '자동 모드 말고 직접 답할게요',
+      '자동 모드, 쓰지 마.', '자동 모드로 해. 아니, 직접 물어봐.', '에어컨 자동 모드와 냉방 모드의 소비전력 차이를 비교해 줘.', '세탁기 자동 모드 세탁 시간을 비교해 줘.',
+      'Compare the auto-moderation features of Discord and Slack.', '미러리스 카메라 자동모드 노출 정확도를 비교해 줘.', '반자동 모드 카메라 출고가를 비교해 줘.',
+      '에어컨을 자동 모드로 해 두면 전기료가 얼마나 나오는지 알려 줘.', '자동 모드 아니면 안 돼.', '자동 모드 말고는 시간이 없어.',
+      // 낱말 가운데의 «자동 모드»(반자동 · semi-auto)는 요청 꼴이어도 표지가 아니다
+      '반자동 모드로 해 줘.', 'semi-auto mode please'];
+    const wrongOn = AUTO_OFF.filter((s) => saysAutoMode(s)), wrongOff = AUTO_ON.filter((s) => !saysAutoMode(s));
+    // 서버 왕복: 부정 원래 말·주제어 원래 말 + 시한 default = 거부(고유 문구) · 묻지 말라는 요청 꼴 = 통과(auto_basis original_question)
+    const OQ_NEGAUTO = `${OQ_NOAUTO} 자동 모드가 아니라 나한테 직접 물어봐 줘.`;
+    const m41n = rej({ question: OQ_NEGAUTO, salt: 't41n', deadline_source: 'default', gate: { ...G4, original_question: OQ_NEGAUTO } });
+    const OQ_TOPIC = '세탁기 자동 모드 세탁 시간을 삼성·LG 2026년형 공식 사양서로 비교해 줘.';
+    const m41t = rej({ question: OQ_TOPIC, salt: 't41t', deadline_source: 'default', gate: { ...G4, original_question: OQ_TOPIC } });
+    const OQ_M3 = `${OQ_NOAUTO} 자동 모드로 안 묻고 진행해.`;
+    const p41 = p1Of(okStart({ question: OQ_M3, salt: 't41p', deadline_source: 'default', gate: { ...G4, original_question: OQ_M3 } }));
+    ok('자동 모드 판정: 요청 꼴만 켬(15/15) · 부정·인접 절 부정·다음 문장 번복·주제어·낱말 가운데·이중 부정 = 끔(22/22) · 서버 왕복 부정·주제어 = 거부 · «안 묻고 진행해» = 통과',
+       !wrongOn.length && !wrongOff.length && m41n.includes(U_DL_DEFAULT) && m41t.includes(U_DL_DEFAULT) && p41?.auto_mode === true && p41?.auto_basis === 'original_question',
+       `wrongOn=${JSON.stringify(wrongOn)} wrongOff=${JSON.stringify(wrongOff)} neg=${m41n ? 'rej' : 'PASS'} topic=${m41t ? 'rej' : 'PASS'} m3=${p41?.auto_mode}`);
+
+    // 42 시한 인용 모양(0.55.13 · 2회차 검증 M1·M2) — 받는 꼴 = 기간형(«3일 안에»·«일주일 내»·«사흘 안에»·«2시간 이내»)·날짜형(«11월 10일 전에»·«11/10»
+    //    — 연도가 붙은 날짜는 «까지·전» 같은 시한 낱말이 붙어야)·날+시각(«오늘 18시까지»)·월말형(«이번 달 말»·«월말»)·영문(«by Friday»·«EOD»).
+    //    거부 = 조각 단독(«까지»·«요일»·«오후»·«오늘»·«until»·«by brand»), 낱말 가운데 숫자+시(«3시리즈»), 연도+까지(«2025년까지»),
+    //    시한 낱말 없는 연도 날짜(기준일 «2026-11-01»), «…부터 …까지» 기간의 끝.
+    const OQ_B = '2026년 국내 전기차 판매 상위 다섯 브랜드를 국토부 공식 통계로 비교해 줘.';
+    const DL_OK = ['3일 안에', '일주일 내', '사흘 안에', '11월 10일 전에', '11/10', '이번 달 말', '월말', '2시간 이내', '1시간 안에', '30분 안에', '금요일 전에',
+      'by Friday', 'EOD', '오늘 18시까지', '내일 오전 중', '2026-11-10까지', '18:00 전까지', '오후 3시'];
+    const okDl = DL_OK.map((q, i) => { const oq = `${OQ_B} ${q} 부탁해.`;
+      const s = okStart({ question: oq, salt: `t42a${i}`, deadline_source: 'operator', deadline_quote: q, gate: { ...G4, original_question: oq } });
+      return s?.session_id ? '' : `${q}:${String(s?.err).slice(0, 30)}`; }).filter(Boolean);
+    const RANGE_OQ = '11월 1일부터 11월 10일까지 나온 전기차 기사를 공식 매체로 모아 줘.';
+    const DL_BAD = [['2020년부터 2025년까지 국내 전기차 연간 판매량을 국토부 공식 통계로 정리해 줘.', '까지'],
+      ['2020년부터 2025년까지 국내 전기차 연간 판매량을 국토부 공식 통계로 정리해 줘.', '2025년까지'], ['Compare 2026 EV sales by brand using official statistics.', 'by brand'],
+      ['BMW 3시리즈 2026년식 국내 출고가를 공식 가격표로 알려 줘.', '3시'], ['서울 지하철 2호선 요일별 승객 수를 서울교통공사 공식 통계로 알려 줘.', '요일'],
+      ['서울 오후 시간대 미세먼지 평균을 에어코리아 공식 자료로 알려 줘.', '오후'], ['List EV models sold until 2020 in Korea from official data.', 'until'],
+      [OQ_CLEAR, '2026-11-01'], [OQ_CLEAR, '오늘'], ['2026년 11월 1일 기준 국내 전기차 등록 대수를 국토부 공식 통계로 알려 줘.', '2026년 11월 1일'], [RANGE_OQ, '11월 10일까지']];
+    const badDl = DL_BAD.map(([oq, q], i) => rej({ question: oq, salt: `t42b${i}`, deadline_source: 'operator', deadline_quote: q, gate: { ...G4, original_question: oq } }));
+    ok('시한 인용 모양: 기간형·날짜형·날+시각·월말·영문 = 통과(18/18) · 조각 단독·낱말 가운데·연도+까지·기준일(연도 날짜 단독)·기간의 끝 = 거부(11/11, 고유 문구) · 기간의 끝 = «부터» 안내',
+       !okDl.length && badDl.every((m) => m.includes(U_DQ_SHAPE)) && badDl[badDl.length - 1].includes('기간의 끝'),
+       `okMiss=${JSON.stringify(okDl)} bad=${badDl.map((m, i) => (m.includes(U_DQ_SHAPE) ? '' : DL_BAD[i][1])).filter(Boolean).join(',')}`);
+
+    // 43 유니코드 정규화(0.55.13 · M6) — 원래 말·질문·시한 인용·인터뷰 글은 NFC 로 맞춘 뒤 본다(NFD «그거» 가 지시대명사 검사를 지나갔다)
+    const OQ_NFD_D = '그거 가격 알아봐 줘. 18:00 전까지.'.normalize('NFD');
+    const m43d = rej({ question: OQ_NFD_D, salt: 't43a', deadline_quote: '18:00 전까지'.normalize('NFD'), gate: { ...G4, original_question: OQ_NFD_D } });
+    const s43 = okStart({ question: OQ_CLEAR, salt: 't43b', deadline_source: 'operator', deadline_quote: '오늘 18시까지', gate: { ...G4, original_question: OQ_CLEAR.normalize('NFD') } });
+    const p43a = p1Of(okStart({ question: OQ_AUTO.normalize('NFD'), salt: 't43c', deadline_source: 'default', gate: { ...G4, original_question: OQ_AUTO.normalize('NFD') } }));
+    const IV_NFD = 'interview_ffff000000000004';
+    mkIv(IV_NFD, { status: 'completed', score: 0.1, answers: 2, ctx: interviewContextFor('요즘 시세 알아봐 줘').normalize('NFD') });
+    const s43i = okStart({ question: '다듬은 시세 질문', salt: 't43d', deadline_source: 'operator',
+      gate: { ...G4, initial_verdicts: IV_X, original_question: '요즘 시세 알아봐 줘', operator_clarification: { ...oc23, interview_session_id: IV_NFD } } });
+    ok('NFC: NFD 원래 말 «그거» = 지시대명사 거부 · NFD 원래 말 + NFC 질문 = 같은 말(원장 NFC) · NFD «자동 모드로» = 켬 · NFD 인터뷰 시작 글 = 같은 글',
+       m43d.includes('원래 말에 지시대명사(«그거»') && !!s43?.session_id && p1Of(s43)?.original_question === OQ_CLEAR && p43a?.auto_mode === true && !!s43i?.session_id,
+       `deictic=${m43d ? m43d.slice(0, 30) : 'PASS'} same=${s43?.err ?? 'PASS'} auto=${p43a?.auto_mode} iv=${s43i?.err ?? 'PASS'}`);
+
+    // 44 고유 문구 자체 검사(0.55.13 · M4) — 위 시험이 단언하는 거부 문구는 모든 거부에 붙는 GATE_RULES·인터뷰 지시문에 없어야 판별력이 있다
+    const UNIQUE = ['사람의 원래 말이 필요하다', '원래 말에 지시대명사(«', U35, U_DL_DEFAULT, 'gate.auto_mode 근거 없음', U_DQ_NONE, U_DQ_NOTIN, U_DQ_SHAPE, '기간의 끝', '운영자 인터뷰 근거가 필요하다'];
+    const leaked = UNIQUE.filter((u) => GATE_RULES.includes(u) || INTERVIEW_FRAME.includes(u));
+    ok('고유 문구: 시험이 단언하는 거부 문구 10개가 GATE_RULES·인터뷰 지시문에 없음', !leaked.length, `leaked=${JSON.stringify(leaked)}`);
 
     // 39 인터뷰 지시문·게이트 규칙·도구 설명이 새 장치를 싣는다(SKILL 을 안 읽는 호스트도 같은 지시)
     const desc39 = JSON.stringify(TOOLS.find((t) => t.name === 'searchflow_start').inputSchema);
