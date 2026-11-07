@@ -139,8 +139,10 @@ function pendingDir() {
 
 /** 매 도구 호출을 append — "검증했다"가 주장이 아니라 원장이 되게. */
 // bot 필드 규칙 = km-search-receipt.py:57 과 동일: DISCORD_STATE_DIR 원문(없으면 '').
+// at = 이 줄을 적은 시각(UTC ISO · `_pending` 의 at 과 같은 꼴). 구 판본은 사건마다 시각이 없어
+// 운영자 답 시각(answered_at) 말고는 «언제 무엇을 했나»를 원장에서 못 쟀다(실제 사용 세션의 원장 사례 15줄 중 시각 0).
 function ledgerAppend(id, event) {
-  appendFileSync(sessionPath(id), JSON.stringify({ ...event, bot: process.env.DISCORD_STATE_DIR ?? '' }) + '\n', 'utf8');
+  appendFileSync(sessionPath(id), JSON.stringify({ ...event, at: new Date().toISOString(), bot: process.env.DISCORD_STATE_DIR ?? '' }) + '\n', 'utf8');
 }
 
 /**
@@ -314,6 +316,8 @@ const INTERVIEW_FRAME =
   '- 비어 있는 칸을 한 메시지에 묶어 한 번에 묻는다(한 칸씩 여러 번 묻지 않는다). 칸마다 고를 수 있는 구체적인 보기 2~3개를 붙인다.\n' +
   '- 맨 처음에 자동 모드 칸을 따로 한 질문으로 묻는다 — 질문 글은 다음 한 줄 그대로(앞뒤에 다른 말을 붙이지 않는다): «' + AUTO_SLOT_LINE + '» 운영자가 «예»라고 답하면 남은 칸은 묻지 않고 봇이 채우며, 봇이 채운 답(끝의 «이대로 맞나요?» 확인 답 포함)은 머리에 [from-auto] 를 붙인다. «아니오»나 다른 답이면 아래처럼 빈 칸을 묶어 묻는다.\n' +
   '- 다섯 칸이 다 차면 새 칸을 열지 않는다. 채운 다섯 칸을 한 줄로 요약해 «이대로 맞나요?» 확인 질문 하나만 한다.';
+// 사다리 ③(aside)을 건너뛴 이유 — 이것 말고는 «열지 못한 페이지를 aside 로 시도했나»를 서버가 묻는다.
+const ASIDE_SKIP = ['hard-gate', 'no-browser-tool'];
 const CTX_BEGIN = '<<<INTERVIEW_INITIAL_CONTEXT';
 const CTX_END = 'INTERVIEW_INITIAL_CONTEXT>>>';
 const INTERVIEW_CONTEXT_HOW =
@@ -406,6 +410,7 @@ const TOOLS = [
               discard_reason: { type: 'string' },
               unreachable_reason: { type: 'string', enum: ['blocked', 'not-traced'] },
               acquired_via: { type: 'string', enum: ['webfetch', 'aside', 'api', 'browser', 'none'], description: 'Optional. How the page was opened (webfetch / aside / api / browser / none).' },
+              aside_skip: { type: 'string', enum: ASIDE_SKIP, description: 'Optional. Why a page that stayed unreachable was not tried with aside (acquisition ladder step three): hard-gate = login, paywall, CAPTCHA, robots or ToS — aside does not open it either; no-browser-tool = neither aside nor another browser tool is available here. An unreachable http(s) page with neither acquired_via aside/browser nor aside_skip is sent back once by searchflow_gate.' },
             },
             required: ['url', 'grade', 'status'],
           },
@@ -419,13 +424,30 @@ const TOOLS = [
     description: 'Ask the server whether the evidence is sufficient. Returns either "done" or which single frame to re-investigate and why. Deliberately returns no scores, weights, or thresholds.',
     inputSchema: {
       type: 'object',
-      properties: { session_id: { type: 'string' } },
+      properties: {
+        session_id: { type: 'string' },
+        done_check: {
+          type: 'array',
+          description: 'End-criterion check. Needed once everything else passes: the gate does not say done until each part of the operator\'s end criterion (P-1 evidence.done) is listed here. item = that part quoted whole from the end criterion (an item covers a part only if it contains the whole part); met = whether the evidence fills it; evidence_urls = used source URLs that fill it; points = for a trend / over-time part («추이»·«추세»·«변화»·«시계열» …), the dated observations ({date YYYY-MM[-DD], value, url}) — a trend needs observations on two or more different dates from used sources. Unfilled parts are sent back once, then end as done_with_gaps (never done).',
+          items: {
+            type: 'object',
+            properties: {
+              item: { type: 'string' },
+              met: { type: 'boolean' },
+              evidence_urls: { type: 'array', items: { type: 'string' } },
+              points: { type: 'array', items: { type: 'object', properties: { date: { type: 'string' }, value: { type: 'string' }, url: { type: 'string' } }, required: ['date', 'url'] } },
+              frame_id: { type: 'string', description: 'Optional. Frame to send back if this part is unfilled (default: the first frame).' },
+            },
+            required: ['item', 'met'],
+          },
+        },
+      },
       required: ['session_id'],
     },
   },
   {
     name: 'searchflow_await_operator',
-    description: 'Record an interview question for the operator and check the interview first. Call this BEFORE relaying each question: the server checks that the interview was opened with the exact initial_context the gate gave (original question + search-interview frame). If it refuses, do not send the question — open a new interview with the text it returns and record again. After it succeeds, relay the question to the operator and end the turn. searchflow_pending lists these so the lead can resume after a restart.',
+    description: 'Record an interview question for the operator and check the interview first. Call this BEFORE relaying each question: the server checks that the interview was opened with the exact initial_context the gate gave (original question + search-interview frame). If it refuses, do not send the question — open a new interview with the text it returns and record again. Only when the operator\'s last answer was a bare yes (e.g. «네», «넵», «응», «맞아요», «yes», «ok»), it also refuses a confirmation question asked right after the confirmation they just answered (confirmation = a narrow phrasing list such as «이대로 맞나요?»; other phrasings pass), and a question that differs from an already-answered one only in its dates (for example after midnight changed «today»); after any other answer («네, 범위는 국내만», «아니요 날짜가 틀렸어요») it refuses neither. When refused, do not ask again: feed «done» to ouroboros_interview if it needs one more stable round. The success reply carries today_local (the date on this machine) to check a «today» date written into a question. After it succeeds, relay the question to the operator and end the turn. searchflow_pending lists these so the lead can resume after a restart.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -883,6 +905,7 @@ function toolSubmit(args) {
     if (s.stance !== undefined && !['support', 'refute', 'neutral'].includes(s.stance)) throw new Error('stance enum 위반');
     if (s.published !== undefined && parsePublished(s.published) === null) throw new Error('published 날짜 형식 위반');
     if (s.acquired_via !== undefined && !['webfetch', 'aside', 'api', 'browser', 'none'].includes(s.acquired_via)) throw new Error('acquired_via enum 위반');
+    if (s.aside_skip !== undefined && !ASIDE_SKIP.includes(s.aside_skip)) throw new Error(`aside_skip enum 위반: ${s.aside_skip} (${ASIDE_SKIP.join('|')})`);
     // 축 분리 강제 — ledger schema v1 과 동일 계약
     if (s.grade === 'UNREACHABLE' && !s.unreachable_reason)
       throw new Error('grade=UNREACHABLE 이면 unreachable_reason(blocked|not-traced) 필수');
@@ -944,13 +967,62 @@ function parsePublished(value) {
   return date.getTime();
 }
 
+// 끝 기준 대조 — 운영자의 끝 기준(p1_gate.evidence.done)을 부분으로 나눠, 호출자가 낸 done_check 가 부분마다 찼는지 본다.
+// 서버는 뜻을 못 본다: 부분 나누기·덮음은 글자 대조, «찼다»는 호출자 신고 + «근거 URL 이 used 출처인가» + 추이 부분의 날짜 다른 관측 둘 이상까지만 잰다.
+const DONE_SPLIT_RE = /\s*(?:[·・,，+＋/;；]|\s및\s|\s그리고\s)\s*/;
+const DONE_TAIL_RE = /\s*(?:(?:이|가|을|를)\s*)?(?:(?:다\s*)?(?:나오면|나오는\s*것|되면|확인되면|채워지면|있으면|모이면|찾으면)\s*)?(?:끝|종료|완료)(?:\s*(?:이다|임|입니다|냄))?\s*[.。]?$/;
+// «추적·일/주/연도/해별·history»는 홀로는 추이가 아니다(«추적 가능한 출처»·«미국 주별 판매처»·«연도별 목록»·«history 책» = 홀로 쓰면 추이가 아닌 꼴) —
+// 재는 양(판매·순위·매출·부수·지수·가격·점유율·랭킹·sales·price·rank·revenue)이 붙을 때만 추이로 본다(«순위 추적»·«일별 판매지수»·«sales history»).
+const DONE_MEASURE = '(?:판매(?!처)|순위|매출|부수|지수|가격|점유율|랭킹|sales|price|rank|revenue)';
+const DONE_SERIES_RE = new RegExp(`추이|추세|시계열|변화|변동|변천|흐름|증감|성장세|월별|분기별|\\btrend|over\\s+time|time\\s*series|trajector|(?:일|주|연도|해)별\\s*${DONE_MEASURE}|${DONE_MEASURE}\\s*(?:추적|histor)`, 'i');
+const doneKey = (t) => nfc(String(t)).replace(/\s+/g, '').toLowerCase();
+export function doneParts(text) {
+  return String(text || '').split(DONE_SPLIT_RE).map((p) => p.replace(DONE_TAIL_RE, '').trim()).filter((p) => doneKey(p).length > 0);
+}
+// 돌려줌: null(대조 없음 — p1_gate 없는 옛 세션) | { missing: true } | { unmet: [{part|item, why, frame_id}] }(빈 배열 = 다 참)
+function doneCriteriaCheck(led, start, byFrame, doneCheck) {
+  const p1 = led.filter((e) => e.event === 'p1_gate').at(-1);
+  const doneText = p1?.evidence?.done;
+  if (typeof doneText !== 'string' || !doneText.trim()) return null;
+  if (doneCheck === undefined) return { missing: true };
+  if (!Array.isArray(doneCheck) || !doneCheck.length) throw new Error('done_check 는 비어 있지 않은 배열이어야 한다 — 끝 기준의 부분마다 {item, met, evidence_urls|points} 하나씩');
+  for (const c of doneCheck) {
+    if (!c || typeof c.item !== 'string' || !c.item.trim() || typeof c.met !== 'boolean')
+      throw new Error('done_check 항목 형식 위반: item(끝 기준에서 따온 부분 글) · met(true|false) 필수');
+    for (const k of ['evidence_urls', 'points']) if (c[k] !== undefined && !Array.isArray(c[k])) throw new Error(`done_check.${k} 는 배열이어야 한다`);
+  }
+  const used = new Set();
+  for (const [, srcs] of byFrame) for (const x of srcs) if (x.status === 'used') used.add(x.url);
+  const frames = new Set(start.frames.map((f) => f.frame_id));
+  const fidOf = (c) => (c && frames.has(c.frame_id) ? c.frame_id : start.frames[0].frame_id);
+  const unmet = [];
+  for (const c of doneCheck) {
+    const urls = [...(c.evidence_urls || []), ...(c.points || []).map((pt) => pt && pt.url)].filter((u) => typeof u === 'string');
+    let why = '';
+    if (!c.met) why = 'reported-unmet';
+    else if (!urls.some((u) => used.has(u))) why = 'no-used-source';
+    else if (DONE_SERIES_RE.test(c.item)) {
+      const dates = new Set((c.points || []).filter((pt) => pt && used.has(pt.url) && parsePublished(pt.date) !== null).map((pt) => parsePublished(pt.date)));
+      if (dates.size < 2) why = 'series-needs-two-dates';
+    }
+    if (why) unmet.push({ item: c.item, why, frame_id: fidOf(c) });
+  }
+  const keys = doneCheck.map((c) => doneKey(c.item));
+  for (const part of doneParts(doneText)) {
+    const pk = doneKey(part);
+    // 덮음 = 항목 글이 그 부분 글을 «통째로» 품을 때만(짧은 항목 «수»·«위»가 여러 부분을 덮던 구멍 — 끝 기준 대조 후속)
+    if (!keys.some((k) => k.includes(pk))) unmet.push({ part, why: 'not-listed', frame_id: start.frames[0].frame_id });
+  }
+  return { unmet };
+}
+
 function toolGate(args) {
   const { session_id } = args;
   const led = ledgerRead(session_id);
   if (!led) throw new Error(`세션 없음: ${session_id}`);
   const start = led.find((e) => e.event === 'start');
   // 미제출 대기(incomplete)는 조사 라운드가 아니므로 세지 않는다 — 세면 재조사 횟수가 줄어든다.
-  const rounds = led.filter((e) => e.event === 'gate' && e.decision !== 'incomplete').length;
+  const rounds = led.filter((e) => e.event === 'gate' && e.decision !== 'incomplete' && e.decision !== 'done_check_required').length;
 
   const byFrame = new Map(start.frames.map((f) => [f.frame_id, []]));
   for (const e of led) {
@@ -977,6 +1049,23 @@ function toolGate(args) {
   // 최대 횟수는 상한이지 의무가 아니다(근거 등급 미달만 최대 횟수까지 다시 본다).
   const retried = (r) => led.some((e) => e.event === 'gate' && e.decision === 'reinvestigate' && e.rule === r);
   const waived = [];
+  // 사다리 ③(aside) — 열지 못한 http(s) 페이지를 aside(또는 다른 브라우저 도구)로 시도하지 않았고 건너뛴 이유(aside_skip)도 없으면
+  // 그 페이지가 있는 프레임을 1회 돌려보낸다. 구 판본은 acquired_via 를 받기만 하고 아무 판정에도 안 읽어,
+  // JS 렌더 페이지(JS 렌더 상세 페이지·SNS)를 «브라우저·aside 시도 없음»으로 둔 채 done 이 났다(실제 사용 세션의 원장 사례 · 워커·채점자 aside 0회).
+  // 같은 URL 을 나중에 aside 로 다시 냈으면(성공·실패 무관) 시도한 것으로 본다. 다시 돌려보낸 뒤에도 남으면 한계로 넘긴다.
+  if (!weak.length) {
+    const tried = new Set();
+    for (const [, srcs] of byFrame) for (const s of srcs)
+      if (s.acquired_via === 'aside' || s.acquired_via === 'browser' || s.aside_skip) tried.add(String(s.url).trim());
+    const untried = [...byFrame.entries()].filter(([, srcs]) => srcs.some((s) =>
+      typeof s.url === 'string' && /^https?:\/\//i.test(s.url.trim()) && (s.status === 'unreachable' || s.grade === 'UNREACHABLE') && !tried.has(s.url.trim())));
+    if (untried.length && retried('aside')) waived.push('aside');
+    else if (untried.length) {
+      weak = [{ fid: untried[0][0] }];
+      rule = 'aside';
+      guidance = '열지 못한 페이지를 aside 로 시도하지 않았다 — 취득 사다리 ③ 대로 aside(없으면 다른 브라우저 도구)로 열어 acquired_via 를 aside 로 다시 제출하라. 로그인·페이월·CAPTCHA·robots·ToS 처럼 aside 로도 열지 않는 곳이면 aside_skip=hard-gate, 브라우저 도구가 없으면 aside_skip=no-browser-tool 로 다시 제출한다.';
+    }
+  }
   if (!weak.length && CRITERIA.require_refute &&
       ![...byFrame.values()].some(srcs => srcs.some(s => s.status === 'used' && s.stance === 'refute'))) {
     if (retried('refute')) waived.push('refute');
@@ -1002,10 +1091,34 @@ function toolGate(args) {
     }
   }
 
+  // 끝 기준 대조 — 다른 규칙이 다 통과해 done 을 낼 차례에만 본다. 구 판본은 등급·반증·신선도만 보고 done 을 내
+  // «시작 이후 추이»(시계열) 끝 기준이 한 시점 스냅샷뿐인데도 done 이 났다(실제 사용 세션의 원장 사례).
+  let doneUnmet = null;
+  if (weak.length === 0) {
+    const dc = doneCriteriaCheck(led, start, byFrame, args.done_check);
+    if (dc?.missing) {
+      const out = { decision: 'done_check_required',
+        guidance: '끝 기준 대조가 빠졌다 — 운영자의 끝 기준(질의 게이트 evidence.done)을 부분으로 나눠, 부분마다 done_check 에 {item: 끝 기준에서 따온 부분 글, met, evidence_urls(used 출처), 추이·변화 부분이면 points(날짜가 다른 관측 둘 이상)} 를 담아 searchflow_gate 를 다시 부른다. 이 응답은 조사 라운드로 세지 않는다.' };
+      return emitGate(session_id, { event: 'gate', decision: out.decision }, out);
+    }
+    if (dc && dc.unmet.length) {
+      doneUnmet = dc.unmet;
+      if (retried('done_criteria')) {
+        const out = { decision: 'done_with_gaps', weak_frames: [...new Set(doneUnmet.map((u) => u.frame_id))],
+          guidance: '끝 기준 가운데 안 찬 부분이 다시 찾아도 남았다 — 보고서에 «조사 끝»으로 쓰지 말고, 안 찬 부분과 그 이유를 한계 칸에 그대로 적는다.' };
+        return emitGate(session_id, { event: 'gate', rule: 'done_criteria', decision: out.decision, rounds: rounds + 1, weak: out.weak_frames, unmet: doneUnmet }, out);
+      }
+      weak = [{ fid: doneUnmet[0].frame_id }];
+      rule = 'done_criteria';
+      guidance = '끝 기준 가운데 아직 안 찬 부분이 있다 — done_check 에서 안 찬 부분(met=false · used 출처 없음 · 끝 기준에 있는데 목록에 없음 · 추이·변화인데 날짜가 다른 관측이 둘이 안 됨)을 찾아라.';
+    }
+  }
+
   if (weak.length === 0) {
     const notes = [];
     if (waived.includes('refute')) notes.push('반대 증거는 다시 찾아봤지만 없었다');
     if (waived.includes('freshness')) notes.push('더 최신 자료는 다시 찾아봤지만 없었다');
+    if (waived.includes('aside')) notes.push('열지 못한 페이지 일부는 aside 시도 없이 남았다');
     const out = { decision: 'done',
       guidance: '근거가 충분하다. searchflow_report 로 보고서를 구성한다(P2 제공 예정 — 현재는 원장을 근거로 직접 작성).' +
         (notes.length ? ` ${notes.join(' · ')} — 보고서 한계 칸에 그대로 적는다.` : '') };
@@ -1016,7 +1129,7 @@ function toolGate(args) {
     const out = { decision: 'done_with_gaps',
       weak_frames: weak.map((w) => w.fid),
       guidance: '재조사 상한에 도달했다. 부족한 프레임을 보고서에 **한계로 명시**하고 마무리한다 — 조용히 넘기지 말 것.' };
-    return emitGate(session_id, { event: 'gate', rule, decision: out.decision, rounds: rounds + 1, weak: out.weak_frames }, out);
+    return emitGate(session_id, { event: 'gate', rule, decision: out.decision, rounds: rounds + 1, weak: out.weak_frames, ...(doneUnmet ? { unmet: doneUnmet } : {}) }, out);
   }
 
   const target = weak[0];
@@ -1025,7 +1138,36 @@ function toolGate(args) {
     : '이 프레임은 근거가 원본에서 멀다 — 인용된 원문·1차 자료를 직접 열어 등급을 올린다.');
   const out = { decision: 'reinvestigate', frame_id: target.fid, guidance: reason,
     note: '가장 약한 프레임 하나만 다시 본다. 나머지는 그대로 둔다.' };
-  return emitGate(session_id, { event: 'gate', rule, decision: 'reinvestigate', frame_id: target.fid, rounds: rounds + 1 }, out);
+  return emitGate(session_id, { event: 'gate', rule, decision: 'reinvestigate', frame_id: target.fid, rounds: rounds + 1, ...(doneUnmet ? { unmet: doneUnmet } : {}) }, out);
+}
+
+// 같은 확인 재질문 막기 — 직전 사람 답이 맨 «네»일 때만(그 밖의 답 뒤엔 둘 다 안 건다): 그 답이 확인 질문(«이대로 맞나요?» 류)에
+// 대한 것인데 또 확인 질문을 보내거나, 이미 답 받은 질문과 날짜만 다른 질문을 보내려 하면 기록(=전달)을 거부한다. 구 판본은 자정을 넘기자 날짜만 바로잡은 같은 확인을
+// 다시 물었다(실제 사용 세션의 원장 사례 · 인터뷰 3회차 00:07 «네» → 4회차 «날짜만 바로잡아 최종 요약을 다시 드립니다»). 인터뷰가 안정 회차를 한 번 더
+// 요구하면 운영자에게 묻지 않고 ouroboros_interview 에 «done» 을 넣으면 된다(authoring_handlers: done 신호 = 안정 회차 +1).
+// 확인 문형은 좁게 둔다 — «진행해도 될까요»·«확인 부탁»·«Is this ok» 까지 넓히면 맨 «네» 뒤의 정당한 새 칸 질문까지 잘못 막혀서 좁게 둔다. 대가 = 목록 밖 재확인은 샌다(운영자 질문 1회).
+const CONFIRM_Q_RE = /이대로\s*(?:맞|괜찮|진행|좋|할까)|맞나요\s*[?？]|맞습니까|맞을까요|맞는지\s*확인/;
+const CONFIRM_YES_RE = /^(?:예|네|넵|응|yes|y|ok|okay|맞아요|맞습니다|좋아요|네네|넵넵|(?:네|넵|예)\s*(?:맞아요|맞습니다|좋아요|좋습니다|진행해\s*주세요|진행해주세요))$/i;
+
+const HOST_DATA_MARK = '[HOST_RESEARCH_DATA';
+const DATE_TOKEN_RE = /\d{4}\s*[-./년]\s*\d{1,2}\s*[-./월]\s*\d{1,2}\s*일?|\d{1,2}\s*월\s*\d{1,2}\s*일|(?<!\d)\d{1,2}\s*\/\s*\d{1,2}(?![\d/])/g;
+// 사람 답 글: 호스트가 덧붙인 조사 자료 칸(HOST_RESEARCH_DATA) 앞까지 · 맨 앞 [from-user] 하나 떼고 · 끝 문장부호 떼고
+const humanAnswerCore = (a) => { const t = String(a ?? ''); const i = t.indexOf(HOST_DATA_MARK); return autoNorm(i >= 0 ? t.slice(0, i) : t).replace(AUTO_USER_HEAD_RE, '').replace(/[.!~。]+$/, '').trim(); };
+const dateFreeKey = (q) => autoNorm(q).replace(DATE_TOKEN_RE, '<날짜>').replace(/[\s.,!?？。·…—–\-()（）«»"'“”‘’]/g, '');
+function todayLocal() { const d = new Date(); const z = (n) => String(n).padStart(2, '0'); return `${d.getFullYear()}-${z(d.getMonth() + 1)}-${z(d.getDate())}`; }
+function repeatAskProblem(rounds, nextQ) {
+  const answered = (Array.isArray(rounds) ? rounds : []).filter((r) => r && typeof r.question === 'string' && typeof r.user_response === 'string' && r.user_response.trim());
+  if (!answered.length) return '';
+  const last = answered.at(-1);
+  // 두 거부 모두 «직전 사람 답이 맨 ‹네›»일 때만 건다 — 운영자가 무엇이든 다른 말을 했으면(«아니요 날짜가 틀렸어요»·«네 근데…») 재질문을 막지 않는다.
+  // 답 글로 «고치라는 말인가»를 가리던 판정은 «네? 틀렸는데요»·«아니요 맞아요» 꼴에서 양쪽 거짓이 나 걷어 냈다.
+  if (AUTO_BOT_ROUND_RE.test(last.user_response) || !CONFIRM_YES_RE.test(humanAnswerCore(last.user_response))) return '';
+  if (CONFIRM_Q_RE.test(autoNorm(last.question)) && CONFIRM_Q_RE.test(autoNorm(nextQ)))
+    return '운영자가 직전 확인 질문에 «네»로 이미 답했다 — 같은 확인을 다시 묻지 않는다';
+  const nk = dateFreeKey(nextQ);
+  const same = answered.find((r) => dateFreeKey(r.question) === nk && autoNorm(r.question) !== autoNorm(nextQ));
+  if (same) return '이미 답 받은 질문과 날짜만 다른 질문이다 — 날짜만 바꿔 다시 묻지 않는다';
+  return '';
 }
 
 function toolAwaitOperator(args) {
@@ -1044,14 +1186,16 @@ function toolAwaitOperator(args) {
   catch (e) { throw new Error(`운영자에게 아직 보내지 마라 — ${e.message}\ninterview_session_id 가 ouroboros_interview 가 돌려준 그 id 인지 먼저 확인한다. 새 인터뷰를 열어야 하면 initial_context 에는 아래 글을 한 글자도 바꾸지 말고 그대로 넣고, 그 첫 질문을 다시 기록한 뒤 보낸다:\n${interviewContextBlock(oqA)}`); }
   try { checkInterviewContext(ivA, oqA); }
   catch (e) { throw new Error(`운영자에게 아직 보내지 마라 — ${e.message}\n이 인터뷰는 버리고, 위 글로 새 인터뷰를 열어 그 첫 질문을 다시 기록한 뒤 보낸다.`); }
+  const rep4 = repeatAskProblem(ivA.rounds, args.last_question);
+  if (rep4) throw new Error(`운영자에게 보내지 마라 — ${rep4}. 운영자가 확인한 내용을 그대로 쓴다 — 자정을 넘겨 «오늘»의 날짜가 바뀐 것뿐이면 다시 묻지 말고, 기준일은 조사를 시작하는 날짜(지금 ${todayLocal()})로 정해 gate.evidence 에 적고 그 정정을 answer_summary 에 한 줄 남긴다. 인터뷰가 안정 회차를 더 요구하면 ouroboros_interview 에 answer «done» 을 넣는다. 운영자 답에 새 조건이 붙어 다시 확인해야 할 때만 바뀐 내용을 담은 새 확인 질문을 기록한다.`);
   appendFileSync(join(pendingDir(), `${id}.jsonl`), JSON.stringify({
     event: 'awaiting_operator', schema_version: '1', interview_session_id: id,
     question: args.question.trim(), last_question: args.last_question.trim(),
     asked_via: args.asked_via.trim(), asked_at: args.asked_at.trim(),
     bot: process.env.DISCORD_STATE_DIR ?? '', at: new Date().toISOString(),
   }) + '\n', 'utf8');
-  return { ok: true, interview_session_id: id,
-    instructions: '질문을 운영자에게 보냈으면 이 턴을 끝내라. 답이 오면 searchflow_pending 으로 이 세션을 찾아 ouroboros_interview 에 답을 넣고 이어 간다.' };
+  return { ok: true, interview_session_id: id, today_local: todayLocal(),
+    instructions: '질문 글에 «오늘»을 날짜로 적었으면 today_local(이 서버 기계의 지금 날짜)과 같은지 본다. 질문을 운영자에게 보냈으면 이 턴을 끝내라. 답이 오면 searchflow_pending 으로 이 세션을 찾아 ouroboros_interview 에 답을 넣고 이어 간다.' };
 }
 
 function toolPending() {
@@ -1141,6 +1285,8 @@ function selfTest() {
     evidence: { goal: '목표 동사 명시', scope: '범위 한정어 실재', done: '유계성 충족', constraints: '시한 명시' },
     self_interview_rounds: 0,
   };
+  // 끝 기준 대조: done 을 기대하는 옛 시험의 끝 기준 대조표 — G_OK 끝 기준(«유계성 충족») 한 부분 · 근거 = 그 시험들이 낸 used 출처(기대값은 그대로)
+  const DC_OK = [{ item: '유계성 충족', met: true, evidence_urls: ['x', 'https://primary', 'https://p1'] }];
   // 사람이 시킨 조사 = 원래 말(original_question)을 그대로 질문으로 쓰고, 시한은 운영자 인터뷰(⑤)에서 받은 꼴 — 실사용 기본 경로.
   let hgN = 0;
   const humanGate = (q) => {
@@ -1220,7 +1366,7 @@ function selfTest() {
     toolSubmit({ session_id: s3.session_id, frame_id: f,
       sources: [{ url: 'x', grade: 'ORIGINAL', status: 'used', stance: 'refute', published: new Date().toISOString().slice(0, 10) }, { url: 'y', grade: 'ORIGINAL', status: 'used' }] });
   }
-  const g3 = toolGate({ session_id: s3.session_id });
+  const g3 = toolGate({ session_id: s3.session_id, done_check: DC_OK });
   ok('강한 근거 = done', g3.decision === 'done');
 
   // 11 🔴 은닉 — gate 응답 어디에도 점수·통과선이 없다
@@ -1318,7 +1464,7 @@ function selfTest() {
   }
   const refuted = evidenceSession('factcheck');
   toolSubmit({session_id:refuted.session_id,frame_id:'f2',sources:[{url:'https://refute',grade:'A',status:'used',stance:'refute'}]});
-  ok('used 반증 한 건 → 반증 규칙 통과', toolGate({session_id:refuted.session_id}).decision === 'done');
+  ok('used 반증 한 건 → 반증 규칙 통과', toolGate({session_id:refuted.session_id, done_check: DC_OK}).decision === 'done');
   for (const [label, published] of [['오래된 날짜','1900-01-01'], ['날짜 없음',null], ['미래 날짜','9999-12-31']]) {
     const session = evidenceSession('market', 'refute', published);
     const out = toolGate({session_id: session.session_id});
@@ -1326,19 +1472,19 @@ function selfTest() {
   }
   // 반증·신선도는 재조사 1회만 — 다시 찾아도 없으면 「찾아봤지만 없었다」로 done(최대 횟수를 다 쓰지 않는다)
   const capSession = evidenceSession('tech');
-  const capOuts = Array.from({length:2}, () => toolGate({session_id:capSession.session_id}));
+  const capOuts = Array.from({length:2}, () => toolGate({session_id:capSession.session_id, done_check: DC_OK}));
   const capDone = ledgerRead(capSession.session_id).filter(e => e.event === 'gate').at(-1);
   ok('반증 미발견 = 재조사 1회 뒤 done(한계 명시 안내)',
      capOuts.map(o => o.decision).join(',') === 'reinvestigate,done' && /반대 증거/.test(capOuts[1].guidance) &&
      (capDone.waived || []).includes('refute') && !('waived' in capOuts[1]), capOuts.map(o => o.decision).join(','));
   const freshOnce = evidenceSession('market', 'refute', '1900-01-01');
-  const freshOuts = Array.from({length:2}, () => toolGate({session_id:freshOnce.session_id}));
+  const freshOuts = Array.from({length:2}, () => toolGate({session_id:freshOnce.session_id, done_check: DC_OK}));
   ok('신선도 미달 = 재조사 1회 뒤 done(한계 명시 안내)',
      freshOuts.map(o => o.decision).join(',') === 'reinvestigate,done' && /최신/.test(freshOuts[1].guidance) &&
      (ledgerRead(freshOnce.session_id).filter(e => e.event === 'gate').at(-1).waived || []).includes('freshness'),
      freshOuts.map(o => o.decision).join(','));
   const bothSession = evidenceSession('tech', 'support', null);
-  const bothOuts = Array.from({length:3}, () => toolGate({session_id:bothSession.session_id}).decision);
+  const bothOuts = Array.from({length:3}, () => toolGate({session_id:bothSession.session_id, done_check: DC_OK}).decision);
   ok('반증·신선도 둘 다 미달 = 각 1회씩 재조사 뒤 done', bothOuts.join(',') === 'reinvestigate,reinvestigate,done', bothOuts.join(','));
   // incomplete 판정은 조사 라운드가 아니다 — 미제출 대기 뒤에도 재조사 3회가 보장돼야 한다
   const lateSession = toolStart({question: 'late submit', type: 'tech', salt: 'late-test', deadline_source: 'operator', gate: humanGate('late submit')});
@@ -1956,6 +2102,181 @@ function selfTest() {
        '');
   } finally {
     if (save4 === undefined) delete process.env.SEARCHFLOW_STATE_DIR; else process.env.SEARCHFLOW_STATE_DIR = save4;
+  }
+
+  // 원장 사건 시각 — 새 세션의 모든 줄에 at(UTC ISO · 파싱 가능 · 줄 순서대로 줄지 않음) · 음성 = at 없는 옛 줄은 시각 0
+  {
+    const led5 = ledgerRead(s3.session_id);
+    const ts5 = led5.map((e) => Date.parse(e.at));
+    const allAt = led5.length > 0 && led5.every((e) => typeof e.at === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(e.at)) && ts5.every((t) => Number.isFinite(t));
+    const mono = ts5.every((t, i) => i === 0 || t >= ts5[i - 1]);
+    const oldLine = { event: 'submit', frame_id: 'f1', bot: '' }; // 구 판본 줄 꼴(실제 사용 세션의 원장 사례)
+    ok('원장 사건 시각: 원장 모든 줄에 사건 시각 at(UTC ISO) · 줄 순서대로 줄지 않음 · 옛 줄 꼴엔 at 없음(음성)',
+       allAt && mono && !('at' in oldLine), `lines=${led5.length} allAt=${allAt} mono=${mono}`);
+  }
+
+  // 사다리 ③(aside) aside — 열지 못한 http(s) 페이지를 aside 없이 두면 1회 돌려보냄(양성) · aside 로 다시 냄·aside_skip·URL 아닌 기록 = 안 걸림(음성)
+  {
+    const today1 = new Date().toISOString().slice(0, 10);
+    const okSrc = [{ url: 'https://p1', grade: 'ORIGINAL', status: 'used', stance: 'refute', published: today1 }, { url: 'https://p2', grade: 'ORIGINAL', status: 'used' }];
+    const kyobo = 'https://product.example/detail/js-rendered';
+    const mk1 = (salt, extra) => {
+      const s = toolStart({ question: 'aside 사다리', type: 'tech', salt, deadline_source: 'operator', gate: humanGate('aside 사다리') });
+      for (const f of s.frames) toolSubmit({ session_id: s.session_id, frame_id: f.frame_id, sources: f.frame_id === 'f2' ? [...okSrc, ...extra] : okSrc });
+      return s;
+    };
+    const rule1 = (s) => ledgerRead(s.session_id).filter((e) => e.event === 'gate').at(-1)?.rule;
+    const DONE1 = ['done', 'done_check_required'];
+    // 양성: 실제 사용 세션의 원장 사례 꼴(UNREACHABLE · acquired_via none · not-traced)
+    const pos = mk1('a1', [{ url: kyobo, grade: 'UNREACHABLE', status: 'unreachable', unreachable_reason: 'not-traced', acquired_via: 'none' }]);
+    const p1o = toolGate({ session_id: pos.session_id });
+    const posOk = p1o.decision === 'reinvestigate' && p1o.frame_id === 'f2' && rule1(pos) === 'aside' && /aside/.test(p1o.guidance) && !('rule' in p1o);
+    // 같은 URL 을 aside 로 다시 냄(열렸든 못 열렸든) → 통과
+    toolSubmit({ session_id: pos.session_id, frame_id: 'f2', sources: [{ url: kyobo, grade: 'ORIGINAL', status: 'used', acquired_via: 'aside', published: today1 }] });
+    const p1b = toolGate({ session_id: pos.session_id });
+    const fixedOk = DONE1.includes(p1b.decision) && rule1(pos) !== 'aside';
+    // status unreachable 이지만 grade 는 다른 꼴(webfetch 로 0바이트)도 걸림
+    const pos2 = mk1('a2', [{ url: kyobo, grade: 'A', status: 'unreachable', acquired_via: 'webfetch' }]);
+    const pos2Ok = toolGate({ session_id: pos2.session_id }).decision === 'reinvestigate' && rule1(pos2) === 'aside';
+    // 반례: 앞 공백 URL · 대문자 HTTPS 도 걸림
+    const pos3 = mk1('a3', [{ url: '  ' + kyobo, grade: 'UNREACHABLE', status: 'unreachable', unreachable_reason: 'not-traced', acquired_via: 'none' }]);
+    const pos4 = mk1('a4', [{ url: kyobo.replace('https', 'HTTPS'), grade: 'UNREACHABLE', status: 'unreachable', unreachable_reason: 'not-traced' }]);
+    const pos34Ok = [pos3, pos4].every((s) => toolGate({ session_id: s.session_id }).decision === 'reinvestigate' && rule1(s) === 'aside');
+    // 음성: aside_skip(hard-gate·no-browser-tool) · acquired_via browser · URL 아닌 검색 기록
+    const negs = [
+      [{ url: kyobo, grade: 'UNREACHABLE', status: 'unreachable', unreachable_reason: 'blocked', acquired_via: 'none', aside_skip: 'hard-gate' }],
+      [{ url: kyobo, grade: 'UNREACHABLE', status: 'unreachable', unreachable_reason: 'not-traced', aside_skip: 'no-browser-tool' }],
+      [{ url: kyobo, grade: 'UNREACHABLE', status: 'unreachable', unreachable_reason: 'not-traced', acquired_via: 'browser' }],
+      [{ url: 'WebSearch: 앱 후기', grade: 'UNREACHABLE', status: 'unreachable', unreachable_reason: 'not-traced', acquired_via: 'none' }],
+    ].map((extra, i) => { const s = mk1(`n${i}`, extra); const o = toolGate({ session_id: s.session_id }); return DONE1.includes(o.decision) && rule1(s) !== 'aside'; });
+    // 재조사 1회 뒤에도 그대로면 한계로 넘김(done 안내에 한계 문구 · 원장 waived)
+    const stuck = mk1('s1', [{ url: kyobo, grade: 'UNREACHABLE', status: 'unreachable', unreachable_reason: 'not-traced', acquired_via: 'none' }]);
+    const st = [toolGate({ session_id: stuck.session_id }), toolGate({ session_id: stuck.session_id, done_check: DC_OK })];
+    const stLast = ledgerRead(stuck.session_id).filter((e) => e.event === 'gate').at(-1);
+    const stuckOk = st[0].decision === 'reinvestigate' && st[1].decision !== 'reinvestigate' &&
+      (st[1].decision !== 'done' || /aside 시도 없이/.test(st[1].guidance)) && (stLast.waived || []).includes('aside');
+    let skipBad = false;
+    try { toolSubmit({ session_id: pos.session_id, frame_id: 'f1', sources: [{ url: kyobo, grade: 'A', status: 'used', aside_skip: 'lazy' }] }); } catch { skipBad = true; }
+    ok('aside 재시도: 열지 못한 페이지 aside 미시도 = 그 프레임 1회 재조사(양성 2) · aside 로 다시 냄·aside_skip 2종·browser·URL 아닌 기록 = 안 걸림(음성 5) · 2회째 = 한계로 넘김 · aside_skip enum 밖 거부',
+       posOk && fixedOk && pos2Ok && pos34Ok && negs.every(Boolean) && stuckOk && skipBad,
+       `pos=${posOk} fixed=${fixedOk} pos2=${pos2Ok} negs=${negs.join(',')} stuck=${st.map((o) => o.decision).join(',')} skipBad=${skipBad}`);
+  }
+
+  // 끝 기준 대조 — 실제 사용 세션의 원장 사례 끝 기준(«…+ 시작 이후 추이»)으로 전후 세트
+  {
+    const DONE_TXT = '상점 3곳 순위·판매지수·리뷰 수 + 시작 이후 추이가 나오면 끝';
+    const parts = doneParts(DONE_TXT);
+    const partsOk = JSON.stringify(parts) === JSON.stringify(['상점 3곳 순위', '판매지수', '리뷰 수', '시작 이후 추이']);
+    const today2 = new Date().toISOString().slice(0, 10);
+    const Y = 'https://store-y/item', A2 = 'https://store-a/item', K = 'https://store-k/item', OLD = 'https://store-y/item?day=1';
+    const mk2 = (salt) => {
+      const g = humanGate('끝 기준 대조'); g.evidence = { ...g.evidence, done: DONE_TXT };
+      const s = toolStart({ question: '끝 기준 대조', type: 'tech', salt, deadline_source: 'operator', gate: g });
+      for (const f of s.frames) toolSubmit({ session_id: s.session_id, frame_id: f.frame_id, sources: [
+        { url: Y, grade: 'ORIGINAL', status: 'used', stance: 'refute', published: today2 }, { url: A2, grade: 'ORIGINAL', status: 'used' },
+        { url: K, grade: 'ORIGINAL', status: 'used' }, { url: OLD, grade: 'ORIGINAL', status: 'used', published: '2026-11-03' },
+        { url: 'https://off', grade: 'A', status: 'discarded', discard_reason: 'off-topic' }] });
+      return s;
+    };
+    const base = [{ item: '상점 3곳 순위', met: true, evidence_urls: [Y, A2, K] }, { item: '판매지수', met: true, evidence_urls: [Y] }, { item: '리뷰 수', met: true, evidence_urls: [Y] }];
+    const snap = { item: '시작 이후 추이', met: true, points: [{ date: today2, value: '9,111', url: Y }], frame_id: 'f2' }; // 한 시점 스냅샷(실사용 꼴)
+    const series = { item: '시작 이후 추이', met: true, points: [{ date: '2026-11-03', value: '1,200', url: OLD }, { date: today2, value: '9,111', url: Y }] };
+    const last2 = (s) => ledgerRead(s.session_id).filter((e) => e.event === 'gate').at(-1);
+    // a) 대조표 없음 = done_check_required(라운드로 안 셈)
+    const sa = mk2('d-a');
+    const a1 = toolGate({ session_id: sa.session_id });
+    const a2 = toolGate({ session_id: sa.session_id, done_check: [...base, series] });
+    const aOk = a1.decision === 'done_check_required' && a2.decision === 'done' && last2(sa).rounds === 1;
+    // b·c) 추이 = 한 시점 → 재조사(done_criteria · 지정 프레임) → 다시도 그대로면 done_with_gaps(never done)
+    const sb = mk2('d-b');
+    const b1 = toolGate({ session_id: sb.session_id, done_check: [...base, snap] });
+    const b1L = last2(sb);
+    const b2 = toolGate({ session_id: sb.session_id, done_check: [...base, snap] });
+    const b2L = last2(sb);
+    const bOk = b1.decision === 'reinvestigate' && b1.frame_id === 'f2' && b1L.rule === 'done_criteria' && b1L.unmet?.[0]?.why === 'series-needs-two-dates' && !('rule' in b1) && !('unmet' in b1) &&
+      b2.decision === 'done_with_gaps' && b2.weak_frames.includes('f2') && b2L.rule === 'done_criteria' && b2L.unmet?.length === 1;
+    // d) 추이 = 날짜 다른 used 관측 둘 → done
+    const sd = mk2('d-d');
+    const dOk = toolGate({ session_id: sd.session_id, done_check: [...base, series] }).decision === 'done';
+    // e) 끝 기준 부분을 목록에서 뺌 · f) used 아닌 URL 로 met · g) 추이 관측 하나가 used 아님 · h) 호출자 신고 met=false → 각각 미충족
+    const why = (dc, salt) => { const s = mk2(salt); toolGate({ session_id: s.session_id, done_check: dc }); const L = last2(s); return L.rule === 'done_criteria' ? L.unmet.map((u) => u.why).join(',') : `rule=${L.rule}:${L.decision}`; };
+    const e = why([base[0], base[1], series], 'd-e');
+    const f = why([base[0], base[1], { item: '리뷰 수', met: true, evidence_urls: ['https://off'] }, series], 'd-f');
+    const g = why([...base, { item: '시작 이후 추이', met: true, points: [{ date: '2026-11-03', url: 'https://nowhere' }, { date: today2, url: Y }] }], 'd-g');
+    const h = why([...base, { item: '시작 이후 추이', met: false }], 'd-h');
+    const negOk = e === 'not-listed' && f === 'no-used-source' && g === 'series-needs-two-dates' && h === 'reported-unmet';
+    // 반례: 짧은 항목(«위»·«수»·«이»)만 · 추이 낱말 뺀 «시작 이후» · 목록 밖이던 «월별» 추이 → 모두 미충족
+    const shortItems = why([{ item: '위', met: true, evidence_urls: [Y] }, { item: '수', met: true, evidence_urls: [Y] }, { item: '이', met: true, evidence_urls: [Y] }], 'd-k');
+    const noSeriesWord = why([...base, { item: '시작 이후', met: true, evidence_urls: [Y] }], 'd-l');
+    const gM = humanGate('끝 기준 대조'); gM.evidence = { ...gM.evidence, done: '월별 판매지수가 나오면 끝' };
+    const sM = toolStart({ question: '끝 기준 대조', type: 'tech', salt: 'd-m', deadline_source: 'operator', gate: gM });
+    for (const fr of sM.frames) toolSubmit({ session_id: sM.session_id, frame_id: fr.frame_id, sources: [{ url: Y, grade: 'ORIGINAL', status: 'used', stance: 'refute', published: today2 }, { url: A2, grade: 'ORIGINAL', status: 'used' }] });
+    toolGate({ session_id: sM.session_id, done_check: [{ item: '월별 판매지수', met: true, points: [{ date: today2, url: Y }] }] });
+    const monthly = last2(sM).unmet?.map((u) => u.why).join(',');
+    // 홀로 쓰면 추이가 아닌 넷(«추적 가능한 출처»·«미국 주별 판매처»·«연도별 목록»·«history 책»)과 재는 양이 붙은 진짜 추이 일곱 → 낱말별 쌍
+    const seriesPos = ['일별 판매지수', '주별 순위', '연도별 판매량', '판매 history', '순위 추적', '해별 판매 부수', 'sales history'];
+    const seriesNeg = ['추적 가능한 출처', '미국 주별 판매처', '연도별 목록', 'history 책', '출처 추적', '상점 3곳 순위', '리뷰 수'];
+    const seriesMiss = seriesPos.filter((x) => !DONE_SERIES_RE.test(x)).concat(seriesNeg.filter((x) => DONE_SERIES_RE.test(x)));
+    const gD = humanGate('끝 기준 대조'); gD.evidence = { ...gD.evidence, done: '일별 판매지수가 나오면 끝' };
+    const sD = toolStart({ question: '끝 기준 대조', type: 'tech', salt: 'd-n', deadline_source: 'operator', gate: gD });
+    for (const fr of sD.frames) toolSubmit({ session_id: sD.session_id, frame_id: fr.frame_id, sources: [{ url: Y, grade: 'ORIGINAL', status: 'used', stance: 'refute', published: today2 }, { url: A2, grade: 'ORIGINAL', status: 'used' }] });
+    toolGate({ session_id: sD.session_id, done_check: [{ item: '일별 판매지수', met: true, points: [{ date: today2, url: Y }] }] });
+    const daily = last2(sD).unmet?.map((u) => u.why).join(',');
+    if (seriesMiss.length || daily !== 'series-needs-two-dates') console.error('끝 기준 대조: 추이 낱말 어긋남:', JSON.stringify({ seriesMiss, daily }));
+    const holesOk = shortItems.split(',').filter((w) => w === 'not-listed').length === 4 && /not-listed/.test(noSeriesWord) && monthly === 'series-needs-two-dates' && !seriesMiss.length && daily === 'series-needs-two-dates';
+    // i) 형식 위반 거부 · j) p1_gate 없는 옛 원장 = 대조 없이 done(호환)
+    let badShape = 0;
+    for (const dc of [[], [{ item: '판매지수', met: 'yes' }], [{ met: true }], 'x']) { try { toolGate({ session_id: sd.session_id, done_check: dc }); } catch { badShape++; } }
+    const sj = mk2('d-j');
+    writeFileSync(sessionPath(sj.session_id), readFileSync(sessionPath(sj.session_id), 'utf8').split('\n').filter((l) => l && JSON.parse(l).event !== 'p1_gate').join('\n') + '\n', 'utf8');
+    const jOk = toolGate({ session_id: sj.session_id }).decision === 'done';
+    ok('끝 기준 대조: 부분 나누기 4 · 대조표 없음 = done_check_required(라운드 안 셈) · 추이 한 시점 = 재조사 → done_with_gaps(done ❌) · 추이 날짜 둘 = done · 목록 빠짐·used 아님·관측 used 아님·met=false = 미충족(음성 4) · 형식 위반 4 거부 · 옛 원장 호환',
+       partsOk && aOk && bOk && dOk && negOk && holesOk && badShape === 4 && jOk,
+       `holes=${shortItems}/${noSeriesWord}/${monthly} parts=${JSON.stringify(parts)} a=${a1.decision},${a2.decision},r${last2(sa).rounds} b=${b1.decision}/${b1L.rule}/${b1L.unmet?.[0]?.why},${b2.decision} d=${dOk} e=${e} f=${f} g=${g} h=${h} bad=${badShape} j=${jOk}`);
+  }
+
+  // 같은 확인 재질문 막기 — 실제 사용 세션의 원장 사례 인터뷰 꼴(3회차 확인 «네» + 호스트 조사 자료 칸 → 4회차 날짜만 고친 확인) 전후 세트
+  {
+    const OQ4 = '친구가 만든 앱이 얼마나 잘 되고 있나 조사하고 싶어';
+    const HOST = '\n\n[HOST_RESEARCH_DATA — 사용자 답변 아님]\n<<<HOST_RESEARCH_DATA:abc BEGIN>>>\nsearch_status=hit\n- "노트.md":1-None\n<<<HOST_RESEARCH_DATA:abc END>>>';
+    const R1 = [AUTO_SLOT_LINE, '[from-user] 아니오' + HOST];
+    const Q2 = '① 찾을 것: (a) 판매 (b) 반응 ④ 기준일: (a) 오늘(2026-11-07), (b) 출시일~오늘 ⑤ 마감 시한: (a) 오늘 안';
+    const R2 = [Q2, '[from-user] 1. 둘 다 4. b 5. 2시간 안에' + HOST];
+    const C3 = '찾을 것 = 앱 하나 성과 / 끝 기준 = 순위·추이 / 기준일 = 출시일~오늘(2026-11-07) / 마감 = 2시간 안 — 이대로 맞나요?';
+    const C4 = '확인 감사합니다. 날짜만 바로잡아 최종 요약을 다시 드립니다. 찾을 것은 앱 하나 성과, 끝 기준은 순위·추이, 기준일은 출시일부터 오늘(2026-11-08)까지, 마감은 2시간 안입니다. 이대로 맞나요?';
+    let n4 = 0;
+    const try4 = (pairs, nextQ) => {
+      const id = `interview_rep4_${++n4}`;
+      mkIvR(id, pairs, OQ4);
+      const pendF = join(pendingDir(), `${id}.jsonl`);
+      try { const r = toolAwaitOperator({ question: OQ4, interview_session_id: id, last_question: nextQ, asked_via: 'operator-dm', asked_at: '2026-11-08T00:09:00+09:00' });
+        return { ok: r.ok === true && /^\d{4}-\d{2}-\d{2}$/.test(r.today_local), msg: '', pend: existsSync(pendF) }; }
+      catch (e) { return { ok: false, msg: e.message, pend: existsSync(pendF) }; }
+    };
+    // 양성(거부): 확인 «네»(+ 조사 자료 칸) 뒤 날짜만 고친 확인 · «네.» · «[from-user] 넵!» · 답한 슬롯 질문과 날짜만 다른 질문
+    const p1 = try4([R1, R2, [C3, '[from-user] 네' + HOST]], C4);
+    const p2 = try4([R1, R2, [C3, '[from-user] 네.']], C4);
+    const p3 = try4([R1, R2, [C3, '[from-user] 넵!']], '다시 정리했습니다 — 이대로 맞나요?');
+    const p4 = try4([R1, [Q2, '[from-user] 네' + HOST]], Q2.replace('2026-11-07', '2026-11-08'));
+    // 반례: 문형 변형·영문 재확인 · «네네» 뒤 재확인 = 거부 / «아니요 날짜가 틀렸어요» 뒤 날짜만 고친 재질문 = 통과
+    // 반례: «네네» 뒤 재확인 = 거부 / «아니요 날짜가 틀렸어요»·«네? 틀렸는데요» 뒤 날짜 고친 재질문 · 맨 «네» 뒤 새 칸 «진행해도 될까요? 아니면 줄일까요?» · 내용 답 뒤 날짜만 다른 질문 = 통과(거짓 막음 0)
+    const p7 = try4([R1, R2, [C3, '[from-user] 네네' + HOST]], C4);
+    const n6 = try4([R1, R2, [C3, '[from-user] 아니요 날짜가 틀렸어요' + HOST]], C3.replace('2026-11-07', '2026-11-08'));
+    const n7 = try4([R1, R2, [C3, '[from-user] 네? 틀렸는데요']], C3.replace('2026-11-07', '2026-11-08'));
+    const n8 = try4([R1, R2, [C3, '[from-user] 네']], '웹 버전도 포함해서 진행해도 될까요? 아니면 모바일만 볼까요?');
+    const n9 = try4([R1, R2], Q2.replace('2026-11-07', '2026-11-08'));
+    const holes4 = !p7.ok && !p7.pend && [n6, n7, n8, n9].every((r) => r.ok && r.pend);
+    const posOk = holes4 && [p1, p2, p3, p4].every((r) => !r.ok && !r.pend && /운영자에게 보내지 마라/.test(r.msg)) && /done/.test(p1.msg) && /같은 확인/.test(p1.msg) && /날짜만 다른/.test(p4.msg);
+    // 음성(통과): 첫 확인 · «네, 범위는 국내만» 뒤 재확인 · 확인 «네» 뒤 새 칸 질문 · 봇 표지 답 뒤 확인 · 같은 질문 그대로(날짜 차이 없음)
+    const n1 = try4([R1, R2], C3);
+    const n2 = try4([R1, R2, [C3, '[from-user] 네, 범위는 국내만' + HOST]], C4);
+    const n3 = try4([R1, R2, [C3, '[from-user] 네']], '추가로, 웹 버전도 포함할까요? (a) 예 (b) 아니오');
+    const n4r = try4([R1, R2, [C3, '[from-auto] 네']], C4);
+    const n5 = try4([R1, R2], Q2);
+    const negOk = [n1, n2, n3, n4r, n5].every((r) => r.ok && r.pend);
+    ok('확인 재질문: 확인 «네» 뒤 같은 확인 재질문·날짜만 다른 재질문 = 기록 거부(양성 4 · 대기 기록 0 · done 안내) · 첫 확인·조건 붙은 «네»·새 칸 질문·봇 답·같은 질문 그대로 = 통과(음성 5 · today_local)',
+       posOk && negOk,
+       `pos=${[p1, p2, p3, p4].map((r) => (r.ok ? 'PASS' : r.msg.slice(0, 24))).join(' | ')} neg=${[n1, n2, n3, n4r, n5].map((r) => (r.ok ? 'ok' : r.msg.slice(0, 40))).join(' | ')}`);
   }
 
   INTERVIEW_DATA_DIR = REAL_INTERVIEW_DIR;
