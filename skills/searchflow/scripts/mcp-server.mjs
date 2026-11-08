@@ -969,8 +969,12 @@ function parsePublished(value) {
 
 // 끝 기준 대조 — 운영자의 끝 기준(p1_gate.evidence.done)을 부분으로 나눠, 호출자가 낸 done_check 가 부분마다 찼는지 본다.
 // 서버는 뜻을 못 본다: 부분 나누기·덮음은 글자 대조, «찼다»는 호출자 신고 + «근거 URL 이 used 출처인가» + 추이 부분의 날짜 다른 관측 둘 이상까지만 잰다.
-const DONE_SPLIT_RE = /\s*(?:[·・,，+＋/;；]|\s및\s|\s그리고\s)\s*/;
-const DONE_TAIL_RE = /\s*(?:(?:이|가|을|를)\s*)?(?:(?:다\s*)?(?:나오면|나오는\s*것|되면|확인되면|채워지면|있으면|모이면|찾으면)\s*)?(?:끝|종료|완료)(?:\s*(?:이다|임|입니다|냄))?\s*[.。]?$/;
+// 구분자 = 줄바꿈 · 세미콜론 · 번호 표지(1. 2. · 1) 2) · (1) (2) · ①②)만. 가운뎃점·쉼표·+·/·«및»·«그리고»는 구 안 연결어라 안 나눈다
+// (구 판본은 이걸로 나눠 «보관 기간·삭제 방법·… 세 항목이 공식 문서·약관 근거로 확인되면 끝»이 «… 세 항목이 공식 문서» 같은 가짜 부분으로 잘렸다 — 실제 사용 세션의 원장 사례).
+// 번호 표지 = 문자열 처음이나 공백 뒤의 1~2자리 + «.»/«)» + 공백 — 그래서 «1.5배»·«v1.6»·«2026. 11월»·«3곳»은 안 나뉜다.
+const DONE_SPLIT_RE = /\s*(?:\r?\n|\r|[;；])\s*|(?:^|\s+)(?:\d{1,2}[.)](?=\s)|\(\d{1,2}\)|[①-⑳])\s*/;
+// 끝 표지 뒤 대시 덧말(«… 확인되면 끝 — 답 크기 유계»)도 꼬리로 뗀다 — 끝 표지 없는 대시(«보관 기간 — 공식 기준»)는 안 건드린다.
+const DONE_TAIL_RE = /\s*(?:(?:이|가|을|를)\s*)?(?:(?:다\s*)?(?:나오면|나오는\s*것|되면|확인되면|채워지면|있으면|모이면|찾으면)\s*)?(?:끝|종료|완료)(?:\s*(?:이다|임|입니다|냄))?(?:\s*[—–-]+.*)?\s*[.。]?$/;
 // «추적·일/주/연도/해별·history»는 홀로는 추이가 아니다(«추적 가능한 출처»·«미국 주별 판매처»·«연도별 목록»·«history 책» = 홀로 쓰면 추이가 아닌 꼴) —
 // 재는 양(판매·순위·매출·부수·지수·가격·점유율·랭킹·sales·price·rank·revenue)이 붙을 때만 추이로 본다(«순위 추적»·«일별 판매지수»·«sales history»).
 const DONE_MEASURE = '(?:판매(?!처)|순위|매출|부수|지수|가격|점유율|랭킹|sales|price|rank|revenue)';
@@ -979,7 +983,8 @@ const doneKey = (t) => nfc(String(t)).replace(/\s+/g, '').toLowerCase();
 export function doneParts(text) {
   return String(text || '').split(DONE_SPLIT_RE).map((p) => p.replace(DONE_TAIL_RE, '').trim()).filter((p) => doneKey(p).length > 0);
 }
-// 돌려줌: null(대조 없음 — p1_gate 없는 옛 세션) | { missing: true } | { unmet: [{part|item, why, frame_id}] }(빈 배열 = 다 참)
+// 돌려줌: null(대조 없음 — p1_gate 없는 옛 세션) | { missing: true } | { unmet: [{part|item, why, frame_id}](빈 배열 = 다 참), rows, parts }
+// rows·parts = 원장 done_check_table 줄 감사용(응답엔 안 실음).
 function doneCriteriaCheck(led, start, byFrame, doneCheck) {
   const p1 = led.filter((e) => e.event === 'p1_gate').at(-1);
   const doneText = p1?.evidence?.done;
@@ -996,8 +1001,9 @@ function doneCriteriaCheck(led, start, byFrame, doneCheck) {
   const frames = new Set(start.frames.map((f) => f.frame_id));
   const fidOf = (c) => (c && frames.has(c.frame_id) ? c.frame_id : start.frames[0].frame_id);
   const unmet = [];
+  const rows = [];
   for (const c of doneCheck) {
-    const urls = [...(c.evidence_urls || []), ...(c.points || []).map((pt) => pt && pt.url)].filter((u) => typeof u === 'string');
+    const urls = [...new Set([...(c.evidence_urls || []), ...(c.points || []).map((pt) => pt && pt.url)].filter((u) => typeof u === 'string'))];
     let why = '';
     if (!c.met) why = 'reported-unmet';
     else if (!urls.some((u) => used.has(u))) why = 'no-used-source';
@@ -1006,14 +1012,20 @@ function doneCriteriaCheck(led, start, byFrame, doneCheck) {
       if (dates.size < 2) why = 'series-needs-two-dates';
     }
     if (why) unmet.push({ item: c.item, why, frame_id: fidOf(c) });
+    rows.push({ item: c.item, verdict: why ? 'unmet' : 'met', ...(why ? { why } : {}), frame_id: fidOf(c),
+      evidence_urls: urls, used_urls: urls.filter((u) => used.has(u)),
+      ...(Array.isArray(c.points) ? { points: c.points.filter((pt) => pt && typeof pt === 'object').map((pt) => ({ date: pt.date, url: pt.url, used: used.has(pt.url) })) } : {}) });
   }
   const keys = doneCheck.map((c) => doneKey(c.item));
+  const parts = [];
   for (const part of doneParts(doneText)) {
     const pk = doneKey(part);
     // 덮음 = 항목 글이 그 부분 글을 «통째로» 품을 때만(짧은 항목 «수»·«위»가 여러 부분을 덮던 구멍 — 끝 기준 대조 후속)
-    if (!keys.some((k) => k.includes(pk))) unmet.push({ part, why: 'not-listed', frame_id: start.frames[0].frame_id });
+    const covered = keys.some((k) => k.includes(pk));
+    parts.push({ part, covered });
+    if (!covered) unmet.push({ part, why: 'not-listed', frame_id: start.frames[0].frame_id });
   }
-  return { unmet };
+  return { unmet, rows, parts };
 }
 
 function toolGate(args) {
@@ -1098,7 +1110,7 @@ function toolGate(args) {
     const dc = doneCriteriaCheck(led, start, byFrame, args.done_check);
     if (dc?.missing) {
       const out = { decision: 'done_check_required',
-        guidance: '끝 기준 대조가 빠졌다 — 운영자의 끝 기준(질의 게이트 evidence.done)을 부분으로 나눠, 부분마다 done_check 에 {item: 끝 기준에서 따온 부분 글, met, evidence_urls(used 출처), 추이·변화 부분이면 points(날짜가 다른 관측 둘 이상)} 를 담아 searchflow_gate 를 다시 부른다. 이 응답은 조사 라운드로 세지 않는다.' };
+        guidance: '끝 기준 대조가 빠졌다 — 운영자의 끝 기준(질의 게이트 evidence.done)을 부분으로 나눠(부분 구분 = 줄바꿈·세미콜론·번호 표지만 · 가운뎃점·쉼표·+·/·및으로 이은 구는 한 부분이라 item 에 통째로 담는다), 부분마다 done_check 에 {item: 끝 기준에서 따온 부분 글, met, evidence_urls(used 출처), 추이·변화 부분이면 points(날짜가 다른 관측 둘 이상)} 를 담아 searchflow_gate 를 다시 부른다. 이 응답은 조사 라운드로 세지 않는다.' };
       return emitGate(session_id, { event: 'gate', decision: out.decision }, out);
     }
     if (dc && dc.unmet.length) {
@@ -2164,7 +2176,8 @@ function selfTest() {
 
   // 끝 기준 대조 — 실제 사용 세션의 원장 사례 끝 기준(«…+ 시작 이후 추이»)으로 전후 세트
   {
-    const DONE_TXT = '상점 3곳 순위·판매지수·리뷰 수 + 시작 이후 추이가 나오면 끝';
+    // 지문 = 허용 구분자(번호 표지)로 다시 씀 — 옛 지문(«…순위·판매지수·리뷰 수 + 시작 이후 추이…»)은 가운뎃점·+ 를 구분자로 박은 옛 규칙이라 새 규칙에선 한 부분이다(«끝 기준 나누기» 칸).
+    const DONE_TXT = '1. 상점 3곳 순위 2. 판매지수 3. 리뷰 수 4. 시작 이후 추이가 나오면 끝';
     const parts = doneParts(DONE_TXT);
     const partsOk = JSON.stringify(parts) === JSON.stringify(['상점 3곳 순위', '판매지수', '리뷰 수', '시작 이후 추이']);
     const today2 = new Date().toISOString().slice(0, 10);
@@ -2233,6 +2246,49 @@ function selfTest() {
     ok('끝 기준 대조: 부분 나누기 4 · 대조표 없음 = done_check_required(라운드 안 셈) · 추이 한 시점 = 재조사 → done_with_gaps(done ❌) · 추이 날짜 둘 = done · 목록 빠짐·used 아님·관측 used 아님·met=false = 미충족(음성 4) · 형식 위반 4 거부 · 옛 원장 호환',
        partsOk && aOk && bOk && dOk && negOk && holesOk && badShape === 4 && jOk,
        `holes=${shortItems}/${noSeriesWord}/${monthly} parts=${JSON.stringify(parts)} a=${a1.decision},${a2.decision},r${last2(sa).rounds} b=${b1.decision}/${b1L.rule}/${b1L.unmet?.[0]?.why},${b2.decision} d=${dOk} e=${e} f=${f} g=${g} h=${h} bad=${badShape} j=${jOk}`);
+  }
+
+  // 끝 기준 나누기 — 가운뎃점은 구분자가 아니다(실제 사용 세션의 원장 사례: «보관 기간·삭제 방법·모델 학습 사용 여부 세 항목이 공식 문서·약관 근거로 확인되면 끝 — 답 크기 유계»
+  // 가 가운뎃점에서 잘려 «모델 학습 사용 여부 세 항목이 공식 문서» · «약관 근거로 확인되면 끝 — 답 크기 유계» 라는 가짜 부분이 unmet 에 올랐다).
+  // 구분자 = 줄바꿈 · 세미콜론 · 번호(1. 2. · 1) 2) · (1) · ① ②) 만. 가운뎃점·쉼표·+·/·«및»·«그리고» = 구 안 연결어라 나누지 않는다.
+  {
+    const REAL = '보관 기간·삭제 방법·모델 학습 사용 여부 세 항목이 공식 문서·약관 근거로 확인되면 끝 — 답 크기 유계';
+    const WHOLE = '보관 기간·삭제 방법·모델 학습 사용 여부 세 항목이 공식 문서·약관 근거로';
+    const BOGUS = ['모델 학습 사용 여부 세 항목이 공식 문서', '약관 근거로 확인되면 끝 — 답 크기 유계', '약관 근거로'];
+    const rp = doneParts(REAL);
+    const realOk = rp.length === 1 && rp[0] === WHOLE && !rp.some((p) => BOGUS.includes(p));
+    // 양성 = 정해진 구분자는 예전처럼(또는 새로) 나뉜다
+    const splitCases = [
+      ['1. 보관 기간 2. 삭제 방법 3. 모델 학습 사용 여부가 확인되면 끝', ['보관 기간', '삭제 방법', '모델 학습 사용 여부']],
+      ['① 보관 기간 ② 삭제 방법 ③ 학습 사용 여부', ['보관 기간', '삭제 방법', '학습 사용 여부']],
+      ['보관 기간; 삭제 방법；학습 사용 여부', ['보관 기간', '삭제 방법', '학습 사용 여부']],
+      ['보관 기간\n삭제 방법\r\n학습 사용 여부', ['보관 기간', '삭제 방법', '학습 사용 여부']],
+      ['(1) 보관 기간 (2) 삭제 방법', ['보관 기간', '삭제 방법']],
+      ['1) 보관 기간 2) 삭제 방법·보관 위치', ['보관 기간', '삭제 방법·보관 위치']],
+    ];
+    const splitBad = splitCases.filter(([t, want]) => JSON.stringify(doneParts(t)) !== JSON.stringify(want)).map(([t]) => t);
+    // 음성 = 구 안 연결어·수 표기는 안 나뉜다
+    const keepCases = ['상점 3곳 순위', '성능 1.5배 향상', 'v1.6 문서 확인', '2026. 11월 기준 가격', '공식 문서·약관 근거', '공식 문서, 약관 근거', '공식 문서/약관 근거', '공식 문서 및 약관 근거', '순위 + 판매지수', '보관 기간 그리고 삭제 방법'];
+    const keepBad = keepCases.filter((t) => doneParts(t).length !== 1);
+    // 끝까지: 같은 끝 기준으로 대조 — 가운뎃점으로 나눈 항목만 내면 가짜 부분이 아니라 «통째 부분 하나»가 not-listed · 통째로 담은 항목 = done
+    const U = 'https://vendor/docs/retention';
+    const mkR = (salt) => {
+      const g = humanGate('끝 기준 가운뎃점'); g.evidence = { ...g.evidence, done: REAL };
+      const s = toolStart({ question: '끝 기준 가운뎃점', type: 'tech', salt, deadline_source: 'operator', gate: g });
+      for (const f of s.frames) toolSubmit({ session_id: s.session_id, frame_id: f.frame_id, sources: [
+        { url: U, grade: 'ORIGINAL', status: 'used', stance: 'refute', published: new Date().toISOString().slice(0, 10) }, { url: 'https://vendor/tos', grade: 'ORIGINAL', status: 'used' }] });
+      return s;
+    };
+    const lastG = (s) => ledgerRead(s.session_id).filter((e) => e.event === 'gate').at(-1);
+    const sx = mkR('mid-x');
+    toolGate({ session_id: sx.session_id, done_check: ['보관 기간', '삭제 방법', '모델 학습 사용 여부'].map((item) => ({ item, met: true, evidence_urls: [U] })) });
+    const xParts = (lastG(sx).unmet || []).filter((u) => u.why === 'not-listed').map((u) => u.part);
+    const xOk = xParts.length === 1 && xParts[0] === WHOLE && !xParts.some((p) => BOGUS.includes(p));
+    const sy = mkR('mid-y');
+    const yOk = toolGate({ session_id: sy.session_id, done_check: [{ item: WHOLE, met: true, evidence_urls: [U] }] }).decision === 'done';
+    ok('끝 기준 나누기: 가운뎃점 = 구분자 아님(실사용 끝 기준 = 부분 1 · 가짜 부분 0) · 줄바꿈·세미콜론·번호 = 나뉨(양성 6) · 가운뎃점·쉼표·+·/·및·그리고·3곳·1.5·v1.6·2026. = 안 나뉨(음성 10) · 대조 끝까지(가짜 부분 unmet 0 · 통째 항목 = done)',
+       realOk && !splitBad.length && !keepBad.length && xOk && yOk,
+       `real=${JSON.stringify(rp)} splitBad=${JSON.stringify(splitBad.map((t) => [t, doneParts(t)]))} keepBad=${JSON.stringify(keepBad.map((t) => [t, doneParts(t)]))} x=${JSON.stringify(xParts)} y=${yOk}`);
   }
 
   // 같은 확인 재질문 막기 — 실제 사용 세션의 원장 사례 인터뷰 꼴(3회차 확인 «네» + 호스트 조사 자료 칸 → 4회차 날짜만 고친 확인) 전후 세트
