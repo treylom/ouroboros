@@ -1108,6 +1108,9 @@ function toolGate(args) {
   let doneUnmet = null;
   if (weak.length === 0) {
     const dc = doneCriteriaCheck(led, start, byFrame, args.done_check);
+    // 감사용 대조표 — done_check 를 실제로 대조한 호출마다 1줄(대조 없음·미제출·형식 위반 throw = 0줄) · 응답엔 안 실음
+    if (dc && !dc.missing) ledgerAppend(session_id, { event: 'done_check_table', done: led.filter((e) => e.event === 'p1_gate').at(-1)?.evidence?.done,
+      rows: dc.rows, parts: dc.parts, unmet_count: dc.unmet.length });
     if (dc?.missing) {
       const out = { decision: 'done_check_required',
         guidance: '끝 기준 대조가 빠졌다 — 운영자의 끝 기준(질의 게이트 evidence.done)을 부분으로 나눠(부분 구분 = 줄바꿈·세미콜론·번호 표지만 · 가운뎃점·쉼표·+·/·및으로 이은 구는 한 부분이라 item 에 통째로 담는다), 부분마다 done_check 에 {item: 끝 기준에서 따온 부분 글, met, evidence_urls(used 출처), 추이·변화 부분이면 points(날짜가 다른 관측 둘 이상)} 를 담아 searchflow_gate 를 다시 부른다. 이 응답은 조사 라운드로 세지 않는다.' };
@@ -2289,6 +2292,49 @@ function selfTest() {
     ok('끝 기준 나누기: 가운뎃점 = 구분자 아님(실사용 끝 기준 = 부분 1 · 가짜 부분 0) · 줄바꿈·세미콜론·번호 = 나뉨(양성 6) · 가운뎃점·쉼표·+·/·및·그리고·3곳·1.5·v1.6·2026. = 안 나뉨(음성 10) · 대조 끝까지(가짜 부분 unmet 0 · 통째 항목 = done)',
        realOk && !splitBad.length && !keepBad.length && xOk && yOk,
        `real=${JSON.stringify(rp)} splitBad=${JSON.stringify(splitBad.map((t) => [t, doneParts(t)]))} keepBad=${JSON.stringify(keepBad.map((t) => [t, doneParts(t)]))} x=${JSON.stringify(xParts)} y=${yOk}`);
+  }
+
+  // 끝 기준 대조표 원장 — done_check 를 낸 대조마다 대조표 본문(항목·판정 met/unmet·근거 출처 · 끝 기준 부분·덮음)을 원장에 1줄(done_check_table) 남긴다.
+  // 구 판본은 gate 줄의 unmet 칸만 남아, 무엇을 met 로 신고했고 어느 출처로 채웠는지는 원장에서 못 쟀다(실제 사용 세션의 원장 사례).
+  {
+    const DT = '1. 보관 기간 2. 삭제 방법';
+    const U1 = 'https://vendor/docs/retention', U2 = 'https://vendor/docs/delete';
+    const mkT = (salt) => {
+      const g = humanGate('대조표 원장'); g.evidence = { ...g.evidence, done: DT };
+      const s = toolStart({ question: '대조표 원장', type: 'tech', salt, deadline_source: 'operator', gate: g });
+      for (const f of s.frames) toolSubmit({ session_id: s.session_id, frame_id: f.frame_id, sources: [
+        { url: U1, grade: 'ORIGINAL', status: 'used', stance: 'refute', published: new Date().toISOString().slice(0, 10) }, { url: U2, grade: 'ORIGINAL', status: 'used' },
+        { url: 'https://off', grade: 'A', status: 'discarded', discard_reason: 'off-topic' }] });
+      return s;
+    };
+    const tables = (s) => ledgerRead(s.session_id).filter((e) => e.event === 'done_check_table');
+    const s1 = mkT('tbl-1');
+    toolGate({ session_id: s1.session_id });                                   // done_check_required → 0줄
+    const t0 = tables(s1).length;
+    const DC1 = [{ item: '보관 기간', met: true, evidence_urls: [U1] }, { item: '삭제 방법', met: true, evidence_urls: ['https://off'] }];
+    toolGate({ session_id: s1.session_id, done_check: DC1 });                  // 한 항목 no-used-source → 재조사
+    const T1 = tables(s1);
+    const g1 = ledgerRead(s1.session_id).filter((e) => e.event === 'gate').at(-1);
+    const r = T1[0]?.rows || [];
+    const rowsOk = T1.length === 1 && typeof T1[0].at === 'string' && r.length === DC1.length &&
+      r[0].item === '보관 기간' && r[0].verdict === 'met' && JSON.stringify(r[0].evidence_urls) === JSON.stringify([U1]) && JSON.stringify(r[0].used_urls) === JSON.stringify([U1]) &&
+      r[1].item === '삭제 방법' && r[1].verdict === 'unmet' && r[1].why === 'no-used-source' && JSON.stringify(r[1].used_urls) === '[]' &&
+      JSON.stringify((T1[0].parts || []).map((p) => [p.part, p.covered])) === JSON.stringify([['보관 기간', true], ['삭제 방법', true]]) &&
+      g1.rule === 'done_criteria' && g1.unmet?.[0]?.why === 'no-used-source';           // gate 줄 unmet 은 그대로(대체 ❌)
+    toolGate({ session_id: s1.session_id, done_check: [{ item: '보관 기간', met: true, evidence_urls: [U1] }, { item: '삭제 방법', met: true, evidence_urls: [U2] }] });
+    const T2 = tables(s1);
+    const perCallOk = T2.length === 2 && T2[1].rows.every((x) => x.verdict === 'met') && T2[1].unmet_count === 0;
+    // 음성: 형식 위반(throw) = 0줄 추가 · 대조표가 응답에 실리지 않음 · p1_gate 없는 옛 원장 = 0줄
+    let threw = false;
+    try { toolGate({ session_id: s1.session_id, done_check: [{ item: '보관 기간', met: 'yes' }] }); } catch { threw = true; }
+    const noThrowLine = threw && tables(s1).length === 2;
+    const outLeak = ledgerRead(s1.session_id).filter((e) => e.event === 'outbound' && e.tool === 'searchflow_gate').some((e) => /used_urls|done_check_table/.test(e.verbatim));
+    const so = mkT('tbl-old');
+    writeFileSync(sessionPath(so.session_id), readFileSync(sessionPath(so.session_id), 'utf8').split('\n').filter((l) => l && JSON.parse(l).event !== 'p1_gate').join('\n') + '\n', 'utf8');
+    const oldOk = toolGate({ session_id: so.session_id, done_check: DC1 }).decision === 'done' && tables(so).length === 0;
+    ok('끝 기준 대조표 원장: done_check 낸 대조마다 done_check_table 1줄(at·항목별 met/unmet·why·근거 URL·used URL·부분 덮음) · gate 줄 unmet 유지 · 호출마다 1줄 · 대조표 없음·형식 위반·옛 원장 = 0줄 · 응답엔 안 실림',
+       t0 === 0 && rowsOk && perCallOk && noThrowLine && !outLeak && oldOk,
+       `t0=${t0} T1=${JSON.stringify(T1[0] || null)} perCall=${perCallOk}/${T2.length} throw=${noThrowLine} leak=${outLeak} old=${oldOk}`);
   }
 
   // 같은 확인 재질문 막기 — 실제 사용 세션의 원장 사례 인터뷰 꼴(3회차 확인 «네» + 호스트 조사 자료 칸 → 4회차 날짜만 고친 확인) 전후 세트
