@@ -971,17 +971,47 @@ function parsePublished(value) {
 // 서버는 뜻을 못 본다: 부분 나누기·덮음은 글자 대조, «찼다»는 호출자 신고 + «근거 URL 이 used 출처인가» + 추이 부분의 날짜 다른 관측 둘 이상까지만 잰다.
 // 구분자 = 줄바꿈 · 세미콜론 · 번호 표지(1. 2. · 1) 2) · (1) (2) · ①②)만. 가운뎃점·쉼표·+·/·«및»·«그리고»는 구 안 연결어라 안 나눈다
 // (구 판본은 이걸로 나눠 «보관 기간·삭제 방법·… 세 항목이 공식 문서·약관 근거로 확인되면 끝»이 «… 세 항목이 공식 문서» 같은 가짜 부분으로 잘렸다 — 실제 사용 세션의 원장 사례).
-// 번호 표지 = 문자열 처음이나 공백 뒤의 1~2자리 + «.»/«)» + 공백 — 그래서 «1.5배»·«v1.6»·«2026. 11월»·«3곳»은 안 나뉜다.
-const DONE_SPLIT_RE = /\s*(?:\r?\n|\r|[;；])\s*|(?:^|\s+)(?:\d{1,2}[.)](?=\s)|\(\d{1,2}\)|[①-⑳])\s*/;
-// 끝 표지 뒤 대시 덧말(«… 확인되면 끝 — 답 크기 유계»)도 꼬리로 뗀다 — 끝 표지 없는 대시(«보관 기간 — 공식 기준»)는 안 건드린다.
-const DONE_TAIL_RE = /\s*(?:(?:이|가|을|를)\s*)?(?:(?:다\s*)?(?:나오면|나오는\s*것|되면|확인되면|채워지면|있으면|모이면|찾으면)\s*)?(?:끝|종료|완료)(?:\s*(?:이다|임|입니다|냄))?(?:\s*[—–-]+.*)?\s*[.。]?$/;
+// 번호 표지 = 문자열 처음·공백·줄바꿈·세미콜론 뒤의 1~2자리 + «.»/«)» + 공백 · «(N)» · «①~⑳» — 단 꼴마다 1 부터 차례로 이어지는 것만 표지로 친다
+// («사례 1. A사 2. B사» = 나눔 · «2026. 11. 8. 기준»·«11. 8.»·«가격은 3. 4개»·«상점 3. 리뷰» = 1 부터가 아니라 안 나눔). 그래서 «1.5배»·«v1.6»·«2026. 11월»·«3곳»도 안 나뉜다. 뒤에 «N.»이 바로 오는 번호(«1. 8. 기준» = 날짜 꼴)도 표지로 안 친다.
+// 줄바꿈 뒤 번호(«1. 가격\n2. 순위»)도 같은 차례로 이어 본다(검증자 지적 · 줄 단위로 따로 세면 «2.»가 1 부터가 아니게 됨).
+const DONE_HARD_RE = /\s*(?:\r\n|\r|\n|[;；])\s*/g;
+const DONE_MARK_RE = /(^|[\s;；])(?:(\d{1,2})([.)])(?=\s)(?!\s+\d{1,2}\.)|\((\d{1,2})\)|([①-⑳]))/g;
+// 끝 표지 꼬리. 대시 덧말(«… 확인되면 끝 — 답 크기 유계»)은 끝 표지 앞에 조건 동사(나오면·되면·확인되면 …)가 있을 때만 뗀다 —
+// «서비스 종료 - 데이터 삭제 정책»·«계약 종료 — 환불 조건»처럼 «종료·완료»가 명사인 구는 안 건드린다(검증자 지적).
+const DONE_TAIL_VERB = '(?:\\s*(?:(?:이|가|을|를)\\s*)?(?:다\\s*)?(?:나오면|나오는\\s*것|되면|확인되면|채워지면|있으면|모이면|찾으면)\\s*)';
+const DONE_TAIL_DASH_RE = new RegExp(`${DONE_TAIL_VERB}(?:끝|종료|완료)(?:\\s*(?:이다|임|입니다|냄))?\\s*[—–-]+.*$`);
+const DONE_TAIL_RE = /\s*(?:(?:이|가|을|를)\s*)?(?:(?:다\s*)?(?:나오면|나오는\s*것|되면|확인되면|채워지면|있으면|모이면|찾으면)\s*)?(?:끝|종료|완료)(?:\s*(?:이다|임|입니다|냄))?\s*[.。]?$/;
+function doneCuts(text) {
+  // 잘라 낼 구간 [시작, 끝) 목록 — 줄바꿈·세미콜론 전부 + 꼴마다 1 부터 이어지는 번호 표지
+  const cuts = [];
+  for (const m of text.matchAll(DONE_HARD_RE)) cuts.push([m.index, m.index + m[0].length]);
+  const next = { '.': 1, ')': 1, '()': 1, '◯': 1 };
+  for (const m of text.matchAll(DONE_MARK_RE)) {
+    const kind = m[3] || (m[4] ? '()' : '◯');
+    const n = m[2] ? Number(m[2]) : m[4] ? Number(m[4]) : m[5].codePointAt(0) - 0x2460 + 1;
+    const st = m.index + m[1].length;
+    // 줄·세미콜론 첫머리의 번호는 한 칸 건너뛴 것까지 받는다(«보관 기간;\n2. 삭제» — 첫 부분에 번호를 안 붙인 꼴)
+    const lineHead = st === 0 || cuts.some(([, e]) => e === st);
+    if (n !== next[kind] && !(lineHead && n === next[kind] + 1)) continue;
+    next[kind] = n + 1;
+    let en = m.index + m[0].length;
+    while (en < text.length && /\s/.test(text[en])) en++;
+    cuts.push([st, en]);
+  }
+  return cuts.sort((a, b) => a[0] - b[0]);
+}
 // «추적·일/주/연도/해별·history»는 홀로는 추이가 아니다(«추적 가능한 출처»·«미국 주별 판매처»·«연도별 목록»·«history 책» = 홀로 쓰면 추이가 아닌 꼴) —
 // 재는 양(판매·순위·매출·부수·지수·가격·점유율·랭킹·sales·price·rank·revenue)이 붙을 때만 추이로 본다(«순위 추적»·«일별 판매지수»·«sales history»).
 const DONE_MEASURE = '(?:판매(?!처)|순위|매출|부수|지수|가격|점유율|랭킹|sales|price|rank|revenue)';
 const DONE_SERIES_RE = new RegExp(`추이|추세|시계열|변화|변동|변천|흐름|증감|성장세|월별|분기별|\\btrend|over\\s+time|time\\s*series|trajector|(?:일|주|연도|해)별\\s*${DONE_MEASURE}|${DONE_MEASURE}\\s*(?:추적|histor)`, 'i');
 const doneKey = (t) => nfc(String(t)).replace(/\s+/g, '').toLowerCase();
 export function doneParts(text) {
-  return String(text || '').split(DONE_SPLIT_RE).map((p) => p.replace(DONE_TAIL_RE, '').trim()).filter((p) => doneKey(p).length > 0);
+  const t = String(text || '');
+  const pieces = [];
+  let pos = 0;
+  for (const [st, en] of doneCuts(t)) { if (st >= pos) pieces.push(t.slice(pos, st)); pos = Math.max(pos, en); }
+  pieces.push(t.slice(pos));
+  return pieces.map((p) => p.replace(DONE_TAIL_DASH_RE, '').replace(DONE_TAIL_RE, '').trim()).filter((p) => doneKey(p).length > 0);
 }
 // 돌려줌: null(대조 없음 — p1_gate 없는 옛 세션) | { missing: true } | { unmet: [{part|item, why, frame_id}](빈 배열 = 다 참), rows, parts }
 // rows·parts = 원장 done_check_table 줄 감사용(응답엔 안 실음).
@@ -1125,7 +1155,7 @@ function toolGate(args) {
       }
       weak = [{ fid: doneUnmet[0].frame_id }];
       rule = 'done_criteria';
-      guidance = '끝 기준 가운데 아직 안 찬 부분이 있다 — done_check 에서 안 찬 부분(met=false · used 출처 없음 · 끝 기준에 있는데 목록에 없음 · 추이·변화인데 날짜가 다른 관측이 둘이 안 됨)을 찾아라.';
+      guidance = '끝 기준 가운데 아직 안 찬 부분이 있다 — done_check 에서 안 찬 부분(met=false · used 출처 없음 · 끝 기준에 있는데 목록에 없음 · 추이·변화인데 날짜가 다른 관측이 둘이 안 됨)을 찾아라. 끝 기준에 있는데 목록에 없다고 나온 부분은 그 부분 글을 item 에 통째로 담는다(가운뎃점·쉼표로 이은 구를 쪼개 내면 덮은 것으로 안 친다).';
     }
   }
 
@@ -2268,11 +2298,21 @@ function selfTest() {
       ['보관 기간\n삭제 방법\r\n학습 사용 여부', ['보관 기간', '삭제 방법', '학습 사용 여부']],
       ['(1) 보관 기간 (2) 삭제 방법', ['보관 기간', '삭제 방법']],
       ['1) 보관 기간 2) 삭제 방법·보관 위치', ['보관 기간', '삭제 방법·보관 위치']],
+      // 독립 검증 지적 — 줄바꿈 뒤 번호 · 줄 첫머리 번호 · 사례 목록 · 조건 동사 뒤 대시 덧말만 뗌
+      ['1. 가격\n2. 순위\n3. 리뷰', ['가격', '순위', '리뷰']],
+      ['1) 보관\r\n2) 삭제', ['보관', '삭제']],
+      ['(1) 보관\n(2) 삭제', ['보관', '삭제']],
+      ['① 보관\n② 삭제', ['보관', '삭제']],
+      ['보관 기간;\n2. 삭제', ['보관 기간', '삭제']],
+      ['사례 1. A사 2. B사', ['사례', 'A사', 'B사']],
+      ['가입 완료 - 로그 확인되면 끝', ['가입 완료 - 로그']],
     ];
     const splitBad = splitCases.filter(([t, want]) => JSON.stringify(doneParts(t)) !== JSON.stringify(want)).map(([t]) => t);
     // 음성 = 구 안 연결어·수 표기는 안 나뉜다
-    const keepCases = ['상점 3곳 순위', '성능 1.5배 향상', 'v1.6 문서 확인', '2026. 11월 기준 가격', '공식 문서·약관 근거', '공식 문서, 약관 근거', '공식 문서/약관 근거', '공식 문서 및 약관 근거', '순위 + 판매지수', '보관 기간 그리고 삭제 방법'];
-    const keepBad = keepCases.filter((t) => doneParts(t).length !== 1);
+    const keepCases = ['상점 3곳 순위', '성능 1.5배 향상', 'v1.6 문서 확인', '2026. 11월 기준 가격', '공식 문서·약관 근거', '공식 문서, 약관 근거', '공식 문서/약관 근거', '공식 문서 및 약관 근거', '순위 + 판매지수', '보관 기간 그리고 삭제 방법',
+      // 독립 검증 지적 — 띄어 쓴 날짜·수 · 1 부터가 아닌 홀 번호 · 명사 «종료·완료» 뒤 대시
+      '2026. 11. 8. 기준 가격', '11. 8. 기준 가격', '1. 8. 기준 가격', '가격은 3. 4개 확인', '상점 3. 리뷰', '서비스 종료 - 데이터 삭제 정책 확인', '계약 종료 — 환불 조건', '보관 기간 — 공식 기준'];
+    const keepBad = keepCases.filter((t) => doneParts(t).length !== 1 || doneParts(t)[0] !== t);
     // 끝까지: 같은 끝 기준으로 대조 — 가운뎃점으로 나눈 항목만 내면 가짜 부분이 아니라 «통째 부분 하나»가 not-listed · 통째로 담은 항목 = done
     const U = 'https://vendor/docs/retention';
     const mkR = (salt) => {
@@ -2289,7 +2329,7 @@ function selfTest() {
     const xOk = xParts.length === 1 && xParts[0] === WHOLE && !xParts.some((p) => BOGUS.includes(p));
     const sy = mkR('mid-y');
     const yOk = toolGate({ session_id: sy.session_id, done_check: [{ item: WHOLE, met: true, evidence_urls: [U] }] }).decision === 'done';
-    ok('끝 기준 나누기: 가운뎃점 = 구분자 아님(실사용 끝 기준 = 부분 1 · 가짜 부분 0) · 줄바꿈·세미콜론·번호 = 나뉨(양성 6) · 가운뎃점·쉼표·+·/·및·그리고·3곳·1.5·v1.6·2026. = 안 나뉨(음성 10) · 대조 끝까지(가짜 부분 unmet 0 · 통째 항목 = done)',
+    ok('끝 기준 나누기: 가운뎃점 = 구분자 아님(실사용 끝 기준 = 부분 1 · 가짜 부분 0) · 줄바꿈·세미콜론·번호(줄바꿈 뒤 번호 포함) = 나뉨(양성 13) · 가운뎃점·쉼표·+·/·및·그리고·3곳·1.5·v1.6·띄어 쓴 날짜·홀 번호·명사 종료 뒤 대시 = 안 나뉨·안 잘림(음성 18) · 대조 끝까지(가짜 부분 unmet 0 · 통째 항목 = done)',
        realOk && !splitBad.length && !keepBad.length && xOk && yOk,
        `real=${JSON.stringify(rp)} splitBad=${JSON.stringify(splitBad.map((t) => [t, doneParts(t)]))} keepBad=${JSON.stringify(keepBad.map((t) => [t, doneParts(t)]))} x=${JSON.stringify(xParts)} y=${yOk}`);
   }
