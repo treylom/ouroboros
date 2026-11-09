@@ -974,6 +974,7 @@ function parsePublished(value) {
 // 번호 표지 = 문자열 처음·공백·줄바꿈·세미콜론 뒤의 1~2자리 + «.»/«)» + 공백 · «(N)» · «①~⑳» — 단 꼴마다 1 부터 차례로 이어지는 것만 표지로 친다
 // («사례 1. A사 2. B사» = 나눔 · «2026. 11. 8. 기준»·«11. 8.»·«가격은 3. 4개»·«상점 3. 리뷰» = 1 부터가 아니라 안 나눔). 그래서 «1.5배»·«v1.6»·«2026. 11월»·«3곳»도 안 나뉜다. 뒤에 «N.»이 바로 오거나 앞에 «N.»·«N월»이 바로 있는 번호(«1. 8. 기준»·«2026. 11. 1. 기준»·«11월 1. » = 날짜 꼴)도 표지로 안 친다(앞쪽 확인은 줄을 넘지 않는다 — «1. 매출 11월\n2. 순위»의 «2.»는 번호 · 대가: 한 줄 안 «매출 5월 1. 가격 2. 순위»는 안 나뉨).
 // 줄바꿈 뒤 번호(«1. 가격\n2. 순위»)도 같은 차례로 이어 본다(검증자 지적 · 줄 단위로 따로 세면 «2.»가 1 부터가 아니게 됨).
+// 1 로 시작하는 번호 목록 바로 앞 머리말이 가리킴·개수 말뿐이면(«세 항목 확인되면 끝: 1. 가격 2. 순위») 부분으로 안 친다 — 아래 DONE_HEAD_WORD_RE.
 const DONE_HARD_RE = /\s*(?:\r\n|\r|\n|[;；])\s*/g;
 const DONE_MARK_RE = /(^|[\s;；])(?:(?<!(?:\d\.|\d월)[ \t\u3000]{0,3})(\d{1,2})([.)])(?=\s)(?!\s+\d{1,2}\.)|\((\d{1,2})\)|([①-⑳]))/g;
 // 끝 표지 꼬리. 대시 덧말(«… 확인되면 끝 — 답 크기 유계»)은 끝 표지 앞에 조건 동사(나오면·되면·확인되면 …)가 있을 때만 뗀다 —
@@ -997,9 +998,16 @@ function doneCuts(text) {
     next[kind] = n + 1;
     let en = m.index + m[0].length;
     while (en < text.length && /\s/.test(text[en])) en++;
-    cuts.push([st, en]);
+    cuts.push([st, en, n === 1 ? 'list1' : 'mark']);
   }
   return cuts.sort((a, b) => a[0] - b[0]);
+}
+// 머리말 — 1 로 시작하는 번호 목록 바로 앞 조각(번호 뒤 조각은 아님)에서 끝 쌍점·끝 표지를 떼면 비거나 가리킴·개수 말만 남는 것
+// («세 항목 확인되면 끝: 1. 가격 2. 순위»의 «세 항목» · «다음이 나오면 끝\n1. 가격»의 «다음» · «끝 기준:» · «Done when the following are found:»)은 부분이 아니다(검증 지적 —
+// 남기면 목록에 없는 가짜 부분이 된다). 낱말이 하나라도 목록 밖이면(«공식 가격이 확인되면 끝: 1. 국내»의 «공식 가격» · «사례 1. A사» · «세 곳») 부분으로 남긴다(대가: 목록 밖 가리킴 말은 부분으로 남아 item 에 담아야 함).
+const DONE_HEAD_WORD_RE = /^(?:다음|아래|이하|하기|위|같은|같이|항목|조건|사항|내용|기준|것|끝|모두|전부|다|각각|가지|개|(?:\d{1,2}|한|두|세|네|다섯|여섯|일곱|여덟|아홉|열)(?:가지|개)?|following|below|listed|the|all|each|of|items?|criteria|conditions?|parts?|are|is|when|done|found|met)(?:이|가|을|를|은|는|의|과|와|도|들|들이|들을|들은|들도)?$/i;
+function doneHeadStrip(p) {
+  return p.replace(/[\s:：]+$/, '').replace(DONE_TAIL_DASH_RE, '').replace(DONE_TAIL_RE, '').trim();
 }
 // «추적·일/주/연도/해별·history»는 홀로는 추이가 아니다(«추적 가능한 출처»·«미국 주별 판매처»·«연도별 목록»·«history 책» = 홀로 쓰면 추이가 아닌 꼴) —
 // 재는 양(판매·순위·매출·부수·지수·가격·점유율·랭킹·sales·price·rank·revenue)이 붙을 때만 추이로 본다(«순위 추적»·«일별 판매지수»·«sales history»).
@@ -1008,11 +1016,21 @@ const DONE_SERIES_RE = new RegExp(`추이|추세|시계열|변화|변동|변천|
 const doneKey = (t) => nfc(String(t)).replace(/\s+/g, '').toLowerCase();
 export function doneParts(text) {
   const t = String(text || '');
-  const pieces = [];
+  const pieces = []; // { s: 조각 글, after: 그 앞 자름 종류(null = 글 처음 · 'hard' · 'mark' · 'list1') }
   let pos = 0;
-  for (const [st, en] of doneCuts(t)) { if (st >= pos) pieces.push(t.slice(pos, st)); pos = Math.max(pos, en); }
-  pieces.push(t.slice(pos));
-  return pieces.map((p) => p.replace(DONE_TAIL_DASH_RE, '').replace(DONE_TAIL_RE, '').trim()).filter((p) => doneKey(p).length > 0);
+  let prev = null;
+  for (const [st, en, kind = 'hard'] of doneCuts(t)) { if (st >= pos) pieces.push({ s: t.slice(pos, st), after: prev }); pos = Math.max(pos, en); prev = kind; }
+  pieces.push({ s: t.slice(pos), after: prev });
+  const live = pieces.filter((p) => doneKey(p.s).length > 0);
+  const out = [];
+  live.forEach((p, i) => {
+    const head = (p.after === null || p.after === 'hard') && live[i + 1]?.after === 'list1';
+    if (!head) { out.push(p.s.replace(DONE_TAIL_DASH_RE, '').replace(DONE_TAIL_RE, '').trim()); return; }
+    const h = doneHeadStrip(p.s);
+    if (h.split(/\s+/).every((w) => !w || DONE_HEAD_WORD_RE.test(w))) return;
+    out.push(h);
+  });
+  return out.filter((p) => doneKey(p).length > 0);
 }
 // 돌려줌: null(대조 없음 — p1_gate 없는 옛 세션) | { missing: true } | { unmet: [{part|item, why, frame_id}](빈 배열 = 다 참), rows, parts }
 // rows·parts = 원장 done_check_table 줄 감사용(응답엔 안 실음).
@@ -2309,7 +2327,7 @@ function selfTest() {
       ['가입 완료 - 로그 확인되면 끝', ['가입 완료 - 로그']],
       ['1. A\n1. B', ['A', 'B']],
       ['1. A\n2. B\n1. C\n2. D', ['A', 'B', 'C', 'D']],
-      // 부모 재검 — «N.»·«N월»로 끝난 줄 다음 줄의 번호는 날짜가 아니다(날짜 뒤보기는 줄을 넘지 않음)
+      // 검증 지적 — «N.»·«N월»로 끝난 줄 다음 줄의 번호는 날짜가 아니다(날짜 뒤보기는 줄을 넘지 않음)
       ['1. 매출 11월\n2. 순위', ['매출 11월', '순위']],
       ['1. 가격 3.\n2. 순위', ['가격 3.', '순위']],
       ['1. 기준 2026. 11.\n2. 순위', ['기준 2026. 11.', '순위']],
@@ -2342,6 +2360,45 @@ function selfTest() {
     ok('끝 기준 나누기: 가운뎃점 = 구분자 아님(실사용 끝 기준 = 부분 1 · 가짜 부분 0) · 줄바꿈·세미콜론·번호(줄바꿈 뒤 번호 포함) = 나뉨(양성 20) · 가운뎃점·쉼표·+·/·및·그리고·3곳·1.5·v1.6·띄어 쓴 날짜·홀 번호·명사 종료 뒤 대시 = 안 나뉨·안 잘림(음성 23) · 대조 끝까지(가짜 부분 unmet 0 · 통째 항목 = done)',
        realOk && !splitBad.length && !keepBad.length && xOk && yOk,
        `real=${JSON.stringify(rp)} splitBad=${JSON.stringify(splitBad.map((t) => [t, doneParts(t)]))} keepBad=${JSON.stringify(keepBad.map((t) => [t, doneParts(t)]))} x=${JSON.stringify(xParts)} y=${yOk}`);
+  }
+
+  // 끝 기준 머리말 — 번호 목록 앞 머리말(«세 항목 확인되면 끝: 1. 가격 2. 순위»·«다음이 나오면 끝\n1. 가격»)은 부분이 아니다.
+  // 구 판본은 머리말을 첫 부분으로 남겨(«세 항목 확인되면 끝:»·«다음») 목록에 없는 가짜 부분 → 한 번 더 조사 → done_with_gaps 가 될 수 있었다(검증 지적).
+  // 버리는 머리말 = 1 로 시작하는 번호 목록 바로 앞 조각 가운데, 끝 쌍점·끝 표지를 떼면 비거나 가리킴·개수 말(다음·아래·이하·N가지·항목·모두·끝 기준 …)만 남는 것.
+  // 진짜 조건이 남는 머리말(«공식 가격이 확인되면 끝: 1. 국내 2. 해외»)·번호 뒤 조각·목록이 안 따르는 조각은 부분 그대로다.
+  {
+    const dropCases = [
+      ['세 항목 확인되면 끝: 1. 가격 2. 순위 3. 리뷰', ['가격', '순위', '리뷰']],
+      ['다음이 나오면 끝\n1. 가격\n2. 순위', ['가격', '순위']],
+      ['아래 항목이 모두 확인되면 끝:\n① 가격\n② 순위', ['가격', '순위']],
+      ['다음 두 가지: 1) 가격 2) 순위', ['가격', '순위']],
+      ['끝 기준:\n(1) 가격\n(2) 순위', ['가격', '순위']],
+      ['끝:\n1. 가격\n2. 순위', ['가격', '순위']],
+      ['가격 확인\n다음 2가지도 확인되면 끝：\n1. 순위\n2. 리뷰', ['가격 확인', '순위', '리뷰']],
+      ['Done when the following are found: 1. price 2. rank', ['price', 'rank']],
+    ];
+    const keepCases = [
+      ['공식 가격이 확인되면 끝: 1. 국내 2. 해외', ['공식 가격', '국내', '해외']],
+      ['사례 1. A사 2. B사', ['사례', 'A사', 'B사']],
+      ['5월\n1. 가격\n2. 순위', ['5월', '가격', '순위']],
+      ['1. 다음\n2. 순위', ['다음', '순위']],
+      ['1. 다음\n1. 순위', ['다음', '순위']],
+      ['보관 기간;\n2. 삭제', ['보관 기간', '삭제']],
+      ['다음이 나오면 끝', ['다음']],
+      ['세 곳 확인되면 끝: 1. 가격 2. 순위', ['세 곳', '가격', '순위']],
+    ];
+    const hBad = [...dropCases, ...keepCases].filter(([t, want]) => JSON.stringify(doneParts(t)) !== JSON.stringify(want)).map(([t]) => [t, doneParts(t)]);
+    // 끝까지: 머리말 끝 기준에 목록 항목만 내면 done(가짜 부분 unmet 0)
+    const HD = '세 항목 확인되면 끝: 1. 가격 2. 순위 3. 리뷰';
+    const U = 'https://vendor/docs/price';
+    const gH = humanGate('끝 기준 머리말'); gH.evidence = { ...gH.evidence, done: HD };
+    const sH = toolStart({ question: '끝 기준 머리말', type: 'tech', salt: 'hd-1', deadline_source: 'operator', gate: gH });
+    for (const f of sH.frames) toolSubmit({ session_id: sH.session_id, frame_id: f.frame_id, sources: [
+      { url: U, grade: 'ORIGINAL', status: 'used', stance: 'refute', published: new Date().toISOString().slice(0, 10) }, { url: 'https://vendor/rank', grade: 'ORIGINAL', status: 'used' }] });
+    const hDec = toolGate({ session_id: sH.session_id, done_check: ['가격', '순위', '리뷰'].map((item) => ({ item, met: true, evidence_urls: [U] })) }).decision;
+    ok('끝 기준 머리말: 번호 목록 앞 가리킴·개수 머리말 = 부분 아님(양성 8 · ①·1)·(1)·쌍점만·중간 머리말·영어) · 진짜 조건 머리말·번호 뒤 조각·목록 없는 조각·홀 번호 앞 조각 = 부분 그대로(음성 8) · 대조 끝까지(목록 항목만 = done)',
+       !hBad.length && hDec === 'done',
+       `bad=${JSON.stringify(hBad)} decision=${hDec}`);
   }
 
   // 끝 기준 대조표 원장 — done_check 를 낸 대조마다 대조표 본문(항목·판정 met/unmet·근거 출처 · 끝 기준 부분·덮음)을 원장에 1줄(done_check_table) 남긴다.
