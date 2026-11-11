@@ -5015,6 +5015,7 @@ def test_interview_metadata_includes_question_advisory_fanout_contract() -> None
         "code_context",
         "web_context",
         "data_context",
+        "km_context",
         "ambiguity_contrarian",
         "answer_simplifier",
         "architecture_implications",
@@ -5024,6 +5025,8 @@ def test_interview_metadata_includes_question_advisory_fanout_contract() -> None
     assert lane_by_id["data_context"]["capability"] == "read_data"
     # Required because its no-op answer always exists; see #1754.
     assert lane_by_id["data_context"]["required"] is True
+    assert lane_by_id["km_context"]["capability"] == "recall_knowledge"
+    assert lane_by_id["km_context"]["required"] is False
     assert lane_by_id["ambiguity_contrarian"]["persona"] == "contrarian"
     assert lane_by_id["answer_simplifier"]["persona"] == "simplifier"
     assert lane_by_id["architecture_implications"]["persona"] == "architect"

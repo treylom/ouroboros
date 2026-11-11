@@ -912,6 +912,13 @@ SPAWN_SITE_ALLOWLIST: dict[tuple[str, str, str, int, int], str] = {
         22,
         17,
     ): "Operator/config-selected OpenCode CLI with literal --version, no shell; inherits trusted operator profile after project .env PATH, OpenCode config and loader controls are denied. 5s timeout; unavailable/nonzero/unparseable version returns None (no compatibility diagnosis), never authorizes a security action.",
+    (
+        "src/ouroboros/km/recall.py",
+        "KMRecall._obsidian_cli",
+        "subprocess.run",
+        342,
+        24,
+    ): "Optional local obsidian-cli search with a fixed argv (query, format=json, limit), no shell. Inherits the operator PATH so the CLI can be found; a missing CLI, timeout, or non-zero exit returns no hits and never authorizes an action.",
 }
 
 
