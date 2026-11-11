@@ -19,7 +19,7 @@ Privacy contract — see TELEMETRY.md at the repository root:
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 import hashlib
 import json
 import os
@@ -282,6 +282,8 @@ _WORKFLOW_OUTCOME_KEYS = frozenset(
         "verified",
         "failure_reason_code",
         "failure_cause",
+        "ac_passed",
+        "ac_total",
         "$insert_id",
         "runtime_backend",
         "app_version",
@@ -361,6 +363,7 @@ _AC_VERIFY_CAUSES = frozenset(
         "exit_nonzero",
         "output_assertion_unmatched",
         "workspace_mutated",
+        "no_evidence",
     }
 )
 _UNKNOWN_VERIFY_CAUSE = "unknown"
@@ -413,6 +416,7 @@ _NO_EVIDENCE_REPLAY_REASONS = frozenset(
         "environment_unverifiable",
         "transcript_unavailable",
         "script_absent_from_artifact",
+        "no_call_evidence",
         "no_verifier_verdict",
         "verifier_verdict_not_passed",
         "no_legacy_record",
@@ -421,6 +425,7 @@ _NO_EVIDENCE_REPLAY_REASONS = frozenset(
 _NO_EVIDENCE_SURFACES = frozenset({"cli_run", "mcp_execute", "evolve"})
 _NO_EVIDENCE_COVERAGES = frozenset({"full", "partial", "low"})
 _NO_EVIDENCE_CHECK_PACKAGE = frozenset({"on", "off"})
+_NO_EVIDENCE_CHECK_PACKAGE_MODES = frozenset({"record", "decide", "off"})
 _NO_EVIDENCE_PACKAGE_STATUSES = frozenset(
     {"admitted", "construction_failed", "rejected", "not_run"}
 )
@@ -439,6 +444,7 @@ _ACCEPTANCE_NO_EVIDENCE_KEYS = frozenset(
         "verification_coverage",
         "surface",
         "check_package",
+        "check_package_mode",
         "check_package_status",
         "runtime_backend",
         "app_version",
@@ -449,6 +455,65 @@ _ACCEPTANCE_NO_EVIDENCE_KEYS = frozenset(
         _no_evidence_pair_key(package_reason, replay_reason)
         for package_reason in _NO_EVIDENCE_PACKAGE_REASONS | {_UNKNOWN_NO_EVIDENCE_VALUE}
         for replay_reason in _NO_EVIDENCE_REPLAY_REASONS | {_UNKNOWN_NO_EVIDENCE_VALUE}
+    }
+)
+# The controller-run artifact checks of a decided run (boundary/base_regression.py):
+# what each observed, closed tokens and counts only. SSOT pairing with
+# ``base_regression.ArtifactCheckOutcome``; edit them together. Never a test
+# name, file, path, or criterion.
+_ARTIFACT_CHECK_OUTCOMES = frozenset(
+    {
+        "rejected",
+        "exempted",
+        "passed",
+        "timeout",
+        "base_runner_crash",
+        "no_selected_files",
+        "unsupported_runner",
+        "not_a_test_result",
+        "unavailable",
+        "imported_outside_copy",
+        "not_run",
+        "no_admitted_command",
+        "unconfirmed",
+    }
+)
+# Each check's mode and what its finding did. SSOT pairing with
+# ``base_regression.ArtifactCheckMode`` and ``ArtifactEffect``.
+_ARTIFACT_CHECK_MODES = frozenset({"decide", "record", "off"})
+_ARTIFACT_EFFECTS = frozenset({"decided", "recorded", "regression_unadjudicated", "none"})
+# How the footprint exemption treated a base regression. SSOT pairing with
+# ``base_regression.Exemption``; edit them together.
+_ARTIFACT_EXEMPTIONS = frozenset(
+    {
+        "applied",
+        "none_inside",
+        "no_passing_oracle",
+        "mass_breakage",
+        "no_changed_function",
+        "no_oracle_footprint",
+        "change_outside_functions",
+    }
+)
+_ACCEPTANCE_ARTIFACT_CHECKS_KEYS = frozenset(
+    {
+        "base_regression",
+        "worker_tests",
+        "exemption",
+        "exempted_tests",
+        "base_regression_mode",
+        "worker_test_gate_mode",
+        "base_regression_effect",
+        "worker_tests_effect",
+        "would_fail_criteria",
+        "failed_criteria",
+        "criterion_count",
+        "repairs",
+        "surface",
+        "runtime_backend",
+        "app_version",
+        "os",
+        "ci",
     }
 )
 # Bound on any single string property. Dropped, not truncated -- a truncated
@@ -1000,6 +1065,8 @@ def _resolve_allowed_keys(event: str, properties: dict[str, Any] | None) -> froz
         return _RUNTIME_DRIFT_KEYS
     if event == "acceptance_no_evidence":
         return _ACCEPTANCE_NO_EVIDENCE_KEYS
+    if event == "acceptance_artifact_checks":
+        return _ACCEPTANCE_ARTIFACT_CHECKS_KEYS
     return None
 
 
@@ -1174,6 +1241,7 @@ def capture_acceptance_no_evidence(
     check_package: str | None,
     check_package_status: str | None,
     runtime_backend: str | None,
+    check_package_mode: str | None = None,
 ) -> None:
     """Capture one run's criteria accepted without evidence from any verifier.
 
@@ -1204,7 +1272,65 @@ def capture_acceptance_no_evidence(
                 "verification_coverage": _fold(verification_coverage, _NO_EVIDENCE_COVERAGES),
                 "surface": _fold(surface, _NO_EVIDENCE_SURFACES),
                 "check_package": _fold(check_package, _NO_EVIDENCE_CHECK_PACKAGE),
+                "check_package_mode": _fold(check_package_mode, _NO_EVIDENCE_CHECK_PACKAGE_MODES),
                 "check_package_status": _fold(check_package_status, _NO_EVIDENCE_PACKAGE_STATUSES),
+                "runtime_backend": _canonical_runtime_backend(runtime_backend),
+            },
+        )
+    except Exception:
+        pass
+
+
+def capture_acceptance_artifact_checks(
+    *,
+    base_regression: str | None,
+    worker_tests: str | None,
+    failed_criteria: int,
+    criterion_count: int,
+    repairs: int,
+    surface: str | None,
+    runtime_backend: str | None,
+    exemption: str | None = None,
+    exempted_tests: int = 0,
+    base_regression_mode: str | None = None,
+    worker_test_gate_mode: str | None = None,
+    base_regression_effect: str | None = None,
+    worker_tests_effect: str | None = None,
+    would_fail_criteria: int = 0,
+) -> None:
+    """Capture what the controller-run artifact checks observed on one decided run.
+
+    ``base_regression`` and ``worker_tests`` are each check's outcome: it
+    decided (``rejected``), ran and found nothing (``passed``), or had no
+    observation and why; anything outside the audited vocabulary folds to
+    ``unknown``. ``failed_criteria`` counts the criteria the checks failed in
+    the final decision and ``repairs`` the attempts they sent back to the
+    worker. ``exemption`` is how the footprint exemption treated a base
+    regression (absent when nothing regressed) and ``exempted_tests`` how many
+    regressed tests it set aside. ``*_mode`` is each check's mode
+    (``decide``/``record``/``off``) and ``*_effect`` what its finding did
+    (``decided``, ``recorded`` in record mode, ``regression_unadjudicated``
+    when a regression found without an admitted package decided nothing, or
+    ``none``); ``would_fail_criteria`` counts the criteria the findings that
+    did not decide would have failed. Never raises.
+    """
+    try:
+        capture(
+            "acceptance_artifact_checks",
+            {
+                "base_regression": _fold(base_regression, _ARTIFACT_CHECK_OUTCOMES),
+                "worker_tests": _fold(worker_tests, _ARTIFACT_CHECK_OUTCOMES),
+                "failed_criteria": failed_criteria,
+                "criterion_count": criterion_count,
+                "repairs": repairs,
+                "exemption": None if exemption is None else _fold(exemption, _ARTIFACT_EXEMPTIONS),
+                "exempted_tests": exempted_tests,
+                "base_regression_mode": _fold(base_regression_mode, _ARTIFACT_CHECK_MODES),
+                "worker_test_gate_mode": _fold(worker_test_gate_mode, _ARTIFACT_CHECK_MODES),
+                "base_regression_effect": _fold(base_regression_effect, _ARTIFACT_EFFECTS),
+                "worker_tests_effect": _fold(worker_tests_effect, _ARTIFACT_EFFECTS),
+                "would_fail_criteria": would_fail_criteria,
+                "surface": _fold(surface, _NO_EVIDENCE_SURFACES),
                 "runtime_backend": _canonical_runtime_backend(runtime_backend),
             },
         )
@@ -1263,6 +1389,26 @@ def capture_subagent_dispatch(properties: dict[str, Any]) -> None:
         pass
 
 
+_AC_TALLY_CAP = 10_000
+
+
+def _run_ac_tally_properties(meta: Mapping[str, Any]) -> dict[str, int]:
+    """Forward ``ac_passed``/``ac_total`` only as a consistent pair of bounded ints.
+
+    Producer: ``mcp/tools/run_ac_tally.py``. Anything malformed (non-int,
+    bool, negative, passed > total, absurd size) drops both keys rather than
+    forwarding a partial or spoofed tally.
+    """
+    passed = meta.get("ac_passed")
+    total = meta.get("ac_total")
+    for value in (passed, total):
+        if not isinstance(value, int) or isinstance(value, bool):
+            return {}
+    if not (0 <= passed <= total <= _AC_TALLY_CAP):
+        return {}
+    return {"ac_passed": passed, "ac_total": total}
+
+
 def capture_job_outcome(
     job_id: str,
     job_type: str,
@@ -1303,6 +1449,8 @@ def capture_job_outcome(
             "verified": verified,
             "$insert_id": hashlib.sha256(f"ouroboros-job-outcome\0{job_id}".encode()).hexdigest(),
         }
+        if command == "run":
+            properties.update(_run_ac_tally_properties(meta))
         if resolution is not None:
             properties["failure_reason_code"] = resolution.reason_code.value
             # The fine-grained run cause (SSOT: orchestrator/run_failure_cause.py)

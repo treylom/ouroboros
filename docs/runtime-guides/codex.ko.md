@@ -128,6 +128,25 @@ uv run ouroboros run workflow --runtime codex ~/.ouroboros/seeds/seed_abcd1234ef
 
 **Use Codex default model**을 고르면 Codex의 현재 기본 모델을 그대로 씁니다. 이게 권장 설정입니다 — Ouroboros가 Codex 호출마다 역할별 추론 강도만 넘기므로, Codex App이나 CLI에서 새 모델로 바꾸면 자동으로 그게 쓰입니다. 목록에서 모델을 고르거나 **Enter another model ID…**를 쓰는 건, 특정 단계(Execute 포함)에 모델을 의도적으로 고정하고 싶을 때만 하세요.
 
+AC별 모델 티어 라우팅도 이 자동 선택을 유지합니다. 구체적인 사다리를
+사용하려면 `--model frontier`처럼 티어를 명시하거나
+`OUROBOROS_MODEL_TIER_ROUTING=1`을 설정하세요. `economics.tiers`의
+`provider: codex` 항목이 `openai` 항목보다 우선하며, 명시적 모델 고정은
+라우팅보다 우선합니다. [설정 예시](../config-reference.md#native-runtime-ladders)를 보세요.
+
+설정 화면의 정적 모델 목록은 계정별 사용 가능 목록을 보장하지 않습니다.
+2026-10-18에 확인한 `codex-cli 0.160.0 --help`는 `--model`을 지원하지만
+허용 ID 목록은 제공하지 않습니다. Codex 계정과 공급자 설정에서 확인하세요.
+OpenCode나 OpenAI API에 있는 ID만으로 Codex CLI 지원을 판단할 수 없습니다.
+2026-10-18에 확인한 [공식 Codex 모델 안내](https://developers.openai.com/codex/models/)는
+반복 작업에 `codex -m gpt-6-luna`, 복잡한 코딩·에이전트 작업에
+`codex -m gpt-6.1-sol`, 가장 어려운 작업에 `codex -m gpt-6-astra`를
+제시합니다. frugal / standard / frontier 후보로 설정할 근거는 되지만,
+사용 가능 여부는 요금제·클라이언트·워크스페이스·출시 범위에 달려 있습니다.
+과거 릴리스 기본값이나 현재 계정의 활성 목록을 입증하지는 않습니다.
+Codex MCP의 재개 호출 `codex-reply`는 스레드 모델을 바꿀 수 없어 AC별
+모델 라우팅을 강제된 선택으로 기록하지 않습니다.
+
 **Codex의 MCP/env 연결과 사용자가 직접 관리하는 네이티브 Codex 프로필은 `$CODEX_HOME/config.toml`입니다.** `CODEX_HOME`이 설정돼 있지 않으면 Codex는 `~/.codex/config.toml`을 씁니다.
 
 Codex 기반 Ouroboros 역할들이 Codex CLI의 활성 기본값/프로필을 물려받는 대신 명시적 모델을 쓰게 하려면, `config.yaml` 키를 직접 지정하세요.
@@ -159,7 +178,7 @@ consensus:
 
 > **주의**: `~/.codex/config.toml`은 Ouroboros 단계별 모델을 고정하는 자리가 **아닙니다.** 설정 화면이나 `~/.ouroboros/config.yaml`의 해당 값을 쓰세요. 명시적 `--profile`이 필요하면 사용자가 관리하는 네이티브 Codex 프로필을 그대로 두면 됩니다.
 >
-> 오래 떠 있는 URL 기반 Ouroboros MCP 서버를 운영한다면 그 URL 항목을 `~/.codex/config.toml`에 두세요. `ouroboros setup --runtime codex`는 **기본적으로 그 항목을 보존합니다.** setup이 그 항목을 관리형 command-spawned 서버로 **교체하기를 의도적으로 원할 때만** `--mcp-mode stdio`를 쓰세요.
+> 오래 떠 있는 URL 기반 Ouroboros MCP 서버를 운영한다면 그 URL 항목을 `~/.codex/config.toml`에 두세요. `ouroboros setup --runtime codex`는 **기본적으로 그 항목을 보존합니다.** 지원되는 호스트에서 setup이 그 항목을 관리형 command-spawned 서버로 **교체하기를 의도적으로 원할 때만** `--mcp-mode stdio`를 쓰세요. 네이티브 Windows에서는 앱 서버 종료 위험 때문에 이 방식을 거절합니다. 대신 `--mcp-mode http`를 명시하고, 안내된 loopback MCP 서버를 직접 실행·관리하세요.
 
 ## 빠른 시작
 
@@ -198,13 +217,13 @@ codex --version
 - 가능하면 `orchestrator.codex_cli_path`를 기록합니다
 - 관리되는 Ouroboros 규칙을 `~/.codex/rules/`에 설치합니다
 - 관리되는 Ouroboros 스킬을 `~/.codex/skills/`에 설치합니다
-- `~/.codex/config.toml`에 Ouroboros MCP/env 연결이 없으면 등록하고, setup이 관리하는 stdio 블록은 갱신하되, 사용자가 관리하는 URL·커스텀 항목은 기본적으로 보존합니다
+- 지원되는 호스트에서는 `~/.codex/config.toml`에 Ouroboros MCP/env 연결이 없으면 등록하고, setup이 관리하는 stdio 블록은 갱신하되, 사용자가 관리하는 URL·커스텀 항목은 기본적으로 보존합니다. 네이티브 Windows의 기본 `auto` 모드는 기존 MCP 설정을 보존하고 새 MCP 연결은 등록하지 않습니다. `--mcp-mode http`를 명시한 뒤, Codex Desktop을 열기 전에 안내된 loopback 서버 명령을 직접 실행하세요. setup은 이 서버를 백그라운드 서비스로 설치하지 않습니다
 - 손대지 않은 레거시 자동생성 `ouroboros-*.config.toml` 태스크 프로파일 앵커만 정리합니다. 사용자가 만든 Codex 프로파일은 보존됩니다
 - 관리되는 `ouroboros-worker.config.toml`을 등록해서, Agent OS 워커 서브프로세스가 MCP/env 연결을 잃지 않고도 대화형 Codex 기본값에서 빠질 수 있게 합니다
 
 `~/.codex/` 밖의 전역 산출물도 함께 생깁니다. `ensure_config_dir()`가 `~/.ouroboros/data/`와 `~/.ouroboros/logs/`를 만들고([`setup.py:2632`](../../src/ouroboros/cli/commands/setup.py)), 설정이 처음이면 `~/.ouroboros/credentials.yaml`을 `0600` 권한으로 새로 씁니다([`setup.py:2771`](../../src/ouroboros/cli/commands/setup.py)).
 
-`~/.codex/config.toml`은 **Ouroboros 스테이지 모델 핀을 둘 자리가 아닙니다.** 설정 UI나 그에 대응하는 `~/.ouroboros/config.yaml` 값을 쓰고, 명시적인 `--profile`이 필요할 때만 사용자가 관리하는 네이티브 Codex 프로파일을 유지하세요. 장기 실행 URL 기반 Ouroboros MCP 서버를 직접 운영한다면 그 URL 항목을 `~/.codex/config.toml`에 그대로 두면 됩니다. `ouroboros setup --runtime codex`가 기본적으로 보존합니다. setup이 그 항목을 관리형 command-spawn 서버로 **바꾸길 원할 때만** `--mcp-mode stdio`를 쓰세요.
+`~/.codex/config.toml`은 **Ouroboros 스테이지 모델 핀을 둘 자리가 아닙니다.** 설정 UI나 그에 대응하는 `~/.ouroboros/config.yaml` 값을 쓰고, 명시적인 `--profile`이 필요할 때만 사용자가 관리하는 네이티브 Codex 프로파일을 유지하세요. 장기 실행 URL 기반 Ouroboros MCP 서버를 직접 운영한다면 그 URL 항목을 `~/.codex/config.toml`에 그대로 두면 됩니다. `ouroboros setup --runtime codex`가 기본적으로 보존합니다. 지원되는 호스트에서 setup이 그 항목을 관리형 command-spawn 서버로 **바꾸길 원할 때만** `--mcp-mode stdio`를 쓰세요. 네이티브 Windows에서는 앱 서버 종료 위험 때문에 이 방식을 거절합니다. 대신 `--mcp-mode http`를 명시하고, 안내된 loopback MCP 서버를 직접 실행·관리하세요.
 
 ### 워커 서브프로세스 격리 (Agent OS `runtime_profile`)
 
@@ -373,7 +392,7 @@ uv run ouroboros run workflow --runtime codex --resume <session_id> ~/.ouroboros
 > `ouroboros auto`는 실행 중에 readiness를 다시 보긴 하지만 **조건부이고, 억제되는 두 경우의 결과가 정반대입니다** ([`auto/grading.py:225-226`](../../src/ouroboros/auto/grading.py)):
 >
 > - **ledger 닫힘**(`closure_mode`가 `ledger_only`·`safe_default`이고 degraded가 아닐 때): **ledger의 구조적 완결성이 수용 신호이고 LLM이 매긴 점수는 설계상 낡은 값**이라, 0.2를 크게 웃도는 Seed도 A 등급을 받고 **실행됩니다.** 나머지 채점 축은 그대로 적용됩니다.
-> - **degraded Seed**: 블로커가 억제되는 건 **부분 산출물을 내보내기 위해서일 뿐입니다.** 블로커가 없는 degraded Seed는 **등급이나 `may_run`과 무관하게** 곧바로 partial-product 종단(`AutoPhase.COMPLETE`)으로 갑니다([`auto/pipeline.py:1286`](../../src/ouroboros/auto/pipeline.py)). **RUN에는 절대 도달하지 않습니다.** 남아 있는 블로커는 하드 안전 블로커라 그대로 실행을 종료시킵니다.
+> - **degraded Seed**: 블로커가 억제되는 건 **부분 산출물을 내보내기 위해서일 뿐입니다.** 블로커가 없는 degraded Seed는 **등급이나 `may_run`과 무관하게** 곧바로 partial-product 종단으로 갑니다([`auto/pipeline.py`](../../src/ouroboros/auto/pipeline.py)). **RUN에는 절대 도달하지 않으며**, 세션은 `degraded_seed_not_executed` 사유로 `AutoPhase.BLOCKED`에서 멈춥니다. `COMPLETE`가 아닙니다. 남아 있는 블로커는 하드 안전 블로커라 그대로 실행을 종료시킵니다.
 >
 > 실무적으로: 손으로 쓴 seed에 높은 `ambiguity_score`를 박아도 `ouroboros run workflow`가 막지는 않습니다. 이 값은 **강제 차단 장치가 아니라 출처 기록(provenance)**입니다.
 

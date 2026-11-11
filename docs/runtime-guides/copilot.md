@@ -11,6 +11,12 @@ Kiro runtimes: Ouroboros owns the orchestration loop and shells out to
 flows through your existing `gh auth` session, so there is no separate API
 key to manage.
 
+For live assistant/tool activity, opt into the experimental
+[Copilot ACP transport](copilot-acp.md). It uses the same `copilot` backend and
+setup, but runs `copilot --acp --stdio` instead of `-p`. The CLI behavior described
+on this page remains the default; ACP's permissions and fallback limits are
+documented separately.
+
 > **What makes this runtime different**: Copilot is the only Ouroboros
 > backend that **live-discovers its model catalog**. `ouroboros setup
 > --runtime copilot` queries the GitHub Copilot models API at setup time
@@ -100,7 +106,7 @@ a new default after GitHub ships new models.
 ### Hyphen versus dotted model IDs
 
 Ouroboros' defaults use the Anthropic SDK form
-(`claude-opus-5`, `claude-sonnet-4-6`). Copilot CLI expects its catalog form
+(`claude-opus-5-5`, `claude-sonnet-5-5`). Copilot CLI expects its own catalog form
 (`claude-opus-5`, `claude-sonnet-4.6`). The adapter resolves these forms
 against the discovered Copilot catalog rather than rewriting arbitrary model
 names.
@@ -114,10 +120,12 @@ aliases, or changing only the trailing numeric version separator. For example,
 prefix-stripped or statically mapped one, is returned only when that exact ID
 is in the discovered or bundled catalog.
 
-The current `DEFAULT_OPUS_MODEL` therefore resolves to the published
-`claude-opus-5`, as does `openrouter/anthropic/claude-opus-5`. Future
-Anthropic versions use the same catalog-gated trailing-version rule without
-another static-map entry. An unknown model, or any derived candidate that the
+The prior `claude-opus-5` and `openrouter/anthropic/claude-opus-5` pins
+resolve to `claude-opus-5` when that ID is in the catalog. The current direct
+API pin `claude-opus-5-5` becomes `claude-opus-5.5` only when that exact
+Copilot ID is present; the bundled older catalog does not establish its
+availability. Anthropic versions use the same catalog-gated trailing-version
+rule without another static-map entry. An unknown model, or any derived candidate that the
 active catalog does not publish, remains unchanged—including its OpenRouter
 prefix—so the existing Copilot unavailable-model error stays explicit rather
 than silently selecting a different model.
@@ -132,6 +140,8 @@ from the discovered list (or rerun setup to refresh).
 # ~/.ouroboros/config.yaml
 orchestrator:
   runtime_backend: copilot
+  copilot_transport: cli                     # default; acp enables live activity
+  copilot_acp_fallback: true                 # ACP-only, guarded pre-prompt fallback
   copilot_cli_path: C:\Users\you\AppData\Local\Programs\copilot\copilot.exe   # optional
 llm:
   backend: copilot

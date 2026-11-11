@@ -42,13 +42,26 @@ from ouroboros.providers.base import (
     CompletionResponse,
     Message,
     MessageRole,
-    UsageInfo,
 )
 from ouroboros.providers.codex_cli_stream import RuntimeStreamMixin, collect_stream_lines
 from ouroboros.providers.llm_response import truncate_llm_response_if_oversized
+from ouroboros.providers.native_cli_usage import native_cli_usage
 from ouroboros.providers.profiles import resolve_completion_profile_result
 
 log = structlog.get_logger()
+
+# Codex CLI retries a failed request itself and, once it gives up, reports the
+# last HTTP status only inside the error text ("exceeded retry limit, last
+# status: 429 Too Many Requests, request id: ..."). It emits no structured
+# status field, so this is the one parser that reads it.
+_CODEX_LAST_STATUS = re.compile(r"\blast status:\s*(?P<status>[1-5]\d\d)\b", re.IGNORECASE)
+
+
+def codex_last_http_status(text: str | None) -> int | None:
+    """Return the HTTP status Codex CLI reports after exhausting its retries."""
+    match = _CODEX_LAST_STATUS.search(text or "")
+    return int(match.group("status")) if match else None
+
 
 _SAFE_MODEL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_./:@-]+$")
 _CODEX_REASONING_EFFORT_LEVELS = frozenset({"minimal", "low", "medium", "high", "xhigh"})
@@ -746,6 +759,8 @@ class CodexCliLLMAdapter(RuntimeStreamMixin):
             "stderr": stderr,
             "stdout_errors": stdout_errors,
         }
+        if (http_status := codex_last_http_status(message)) is not None:
+            details["http_status"] = http_status
         auth_failure = cls._looks_like_codex_auth_failure(message)
         openai_responses = cls._uses_openai_responses_endpoint(message)
         if auth_failure:
@@ -1199,7 +1214,7 @@ class CodexCliLLMAdapter(RuntimeStreamMixin):
                 CompletionResponse(
                     content=content,
                     model=normalized_model or "default",
-                    usage=UsageInfo(prompt_tokens=0, completion_tokens=0, total_tokens=0),
+                    usage=native_cli_usage(stdout_lines, provider=self._provider_name),
                     finish_reason="stop",
                     raw_response={
                         "session_id": session_id,
@@ -1364,7 +1379,7 @@ class CodexCliLLMAdapter(RuntimeStreamMixin):
             CompletionResponse(
                 content=content,
                 model=normalized_model or "default",
-                usage=UsageInfo(prompt_tokens=0, completion_tokens=0, total_tokens=0),
+                usage=native_cli_usage(stdout_lines, provider=self._provider_name),
                 finish_reason="stop",
                 raw_response={
                     "session_id": session_id,

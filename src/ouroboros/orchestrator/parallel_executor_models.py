@@ -14,8 +14,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from enum import Enum
 import hashlib
+import json
 from typing import TYPE_CHECKING, Any
 
+from ouroboros.core.seed import Seed
 from ouroboros.orchestrator.decomposition_policy import DecompositionDecisionRecord
 from ouroboros.orchestrator.recoverable_failure import UsageLimitPauseConsequence
 
@@ -33,6 +35,9 @@ class ACExecutionOutcome(str, Enum):  # noqa: UP042
 
     SUCCEEDED = "succeeded"
     SATISFIED_EXTERNALLY = "satisfied_externally"
+    # Judged on its own criterion from the one worker attempt that executed a
+    # Seed whose criteria have no known source (``shared_attempt``).
+    SETTLED_FROM_SHARED_ATTEMPT = "settled_from_shared_attempt"
     FAILED = "failed"
     BLOCKED = "blocked"
     INVALID = "invalid"
@@ -161,6 +166,11 @@ class ACExecutionResult:
     # The legacy verifier's rejection that the check package made advisory;
     # it decides the criteria no admitted check covers.
     legacy_rejection: str | None = None
+    # What the evidence verifier would have rejected when it only records
+    # (``execution.transcript_verifier: record``). Data only: it fails no
+    # criterion, routes no retry or redispatch, and no gate reads it as a
+    # rejection (``governing_verifier_verdict``).
+    recorded_rejection: str | None = None
 
     def __post_init__(self) -> None:
         """Normalize outcome so callers do not infer from error strings."""
@@ -287,6 +297,7 @@ class ParallelExecutionStageResult:
             in {
                 ACExecutionOutcome.SUCCEEDED,
                 ACExecutionOutcome.SATISFIED_EXTERNALLY,
+                ACExecutionOutcome.SETTLED_FROM_SHARED_ATTEMPT,
             }
         )
 
@@ -431,6 +442,12 @@ def collect_decomposition_depth_warning_paths(
     return paths
 
 
+def checkpoint_contract_fingerprint(seed: Seed, policy: dict[str, object]) -> str:
+    payload = {"version": 1, "seed": seed.to_dict(), "policy": policy}
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def checkpoint_outcome(result: ACExecutionResult) -> str:
     """The outcome a checkpoint records for ``result``.
 
@@ -445,7 +462,11 @@ def checkpoint_outcome(result: ACExecutionResult) -> str:
         outcome = result.outcome.value
     else:
         outcome = "succeeded" if result.success else "failed"
-    if outcome in ("succeeded", "satisfied_externally") and _legacy_rejected(result):
+    if outcome in (
+        "succeeded",
+        "satisfied_externally",
+        "settled_from_shared_attempt",
+    ) and _legacy_rejected(result):
         return "failed"
     return outcome
 
@@ -615,9 +636,13 @@ def governing_verifier_verdict(result: ACExecutionResult) -> Any:
     rejection as an advisory annotation (``legacy_rejection``): its verdict
     routes nothing, unless the gate handed the criterion back to the legacy
     verifier (``legacy_owned``). Otherwise the verdict is
-    ``atomic_verifier_verdict`` as before.
+    ``atomic_verifier_verdict`` as before. A verdict the verifier only
+    recorded (``recorded_rejection``, record mode) routes nothing.
     """
     if result.legacy_rejection and not legacy_owned(result):
+        return None
+    if result.recorded_rejection:
+        # A verdict the verifier only recorded routes nothing either.
         return None
     return result.atomic_verifier_verdict
 
@@ -628,8 +653,13 @@ def inherit_check_package_hooks(parent: object, child: object) -> None:
     A derived executor (the cross-harness alternate) runs the same criterion
     under the same acceptance authority: the same per-attempt gate, the same
     advisory legacy verdict, and the same entry-point interfaces in its prompt.
+    It also renders the same worker prompt, so it inherits the run Seed's
+    sourced scope and criteria (``atomic_prompt_builder.SOURCED_SCOPE_ATTR``,
+    ``SEED_CRITERIA_ATTR``).
     """
-    for name in _CHECK_PACKAGE_HOOKS:
+    from ouroboros.orchestrator.atomic_prompt_builder import SEED_CRITERIA_ATTR, SOURCED_SCOPE_ATTR
+
+    for name in (*_CHECK_PACKAGE_HOOKS, SOURCED_SCOPE_ATTR, SEED_CRITERIA_ATTR):
         value = getattr(parent, name, None)
         if value is not None:
             setattr(child, name, value)

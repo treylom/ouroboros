@@ -36,6 +36,7 @@ from ouroboros.orchestrator.adapter import (
     resolve_worker_cwd,
     worker_cwd_failure_message,
 )
+from ouroboros.orchestrator.interview_session import InterviewSessionTransition
 from ouroboros.orchestrator.runtime_error import classify_subprocess_failure
 from ouroboros.providers.codex_cli_stream import (
     iter_runtime_stream_lines,
@@ -53,7 +54,6 @@ from ouroboros.runtime.child_env import DEFAULT_OUROBOROS_STRIP_KEYS, build_chil
 
 log = get_logger(__name__)
 
-_INTERVIEW_SESSION_METADATA_KEY = "ouroboros_interview_session_id"
 
 _STARTUP_TIMEOUT_ENV = "OUROBOROS_HERMES_STARTUP_TIMEOUT_SECONDS"
 _IDLE_TIMEOUT_ENV = "OUROBOROS_HERMES_IDLE_TIMEOUT_SECONDS"
@@ -62,6 +62,40 @@ _IDLE_TIMEOUT_ENV = "OUROBOROS_HERMES_IDLE_TIMEOUT_SECONDS"
 # codex/copilot/kiro) — preserve that divergence; only the Ouroboros markers
 # are removed.
 _CHILD_ENV_STRIP_KEYS = DEFAULT_OUROBOROS_STRIP_KEYS
+_MISSING_PROFILE_CREDENTIALS = re.compile(
+    r"^\s*Hermes isn['’]t configured yet\s*[-–—]+\s*"
+    r"no API keys? or providers? found\.?\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _profile_name_from_home(profile_home: str | Path) -> str | None:
+    """Return a Hermes profile name for a canonical profile directory."""
+    try:
+        candidate = Path(profile_home).expanduser()
+        real_home = os.environ.get("HERMES_REAL_HOME", "").strip()
+        home = Path(real_home).expanduser() if real_home else Path.home()
+        if not candidate.is_absolute() or not home.is_absolute():
+            return None
+        candidate = candidate.resolve()
+        profiles_root = (home / ".hermes" / "profiles").resolve()
+    except OSError:
+        return None
+
+    if candidate.parent != profiles_root or not (candidate / "config.yaml").is_file():
+        return None
+    return candidate.name
+
+
+def _resolve_hermes_profile(explicit: str | None) -> str | None:
+    """Resolve explicit configuration before inheriting a hosting profile."""
+    if explicit is not None and explicit.strip():
+        return explicit.strip()
+
+    hermes_home = os.environ.get("HERMES_HOME", "").strip()
+    if hermes_home:
+        return _profile_name_from_home(hermes_home)
+    return None
 
 
 def _resolve_timeout_override(
@@ -190,6 +224,7 @@ class HermesCliRuntime(AgentRuntime):
         skills_dir: str | Path | None = None,
         skill_dispatcher: SkillDispatchHandler | None = None,
         llm_backend: str | None = None,
+        runtime_profile: str | None = None,
         startup_output_timeout_seconds: float | None = None,
         stdout_idle_timeout_seconds: float | None = None,
     ) -> None:
@@ -201,6 +236,7 @@ class HermesCliRuntime(AgentRuntime):
         self._skills_dir = Path(skills_dir).expanduser() if skills_dir else None
         self._skill_dispatcher = skill_dispatcher
         self._llm_backend = llm_backend or self._default_llm_backend
+        self._runtime_profile = _resolve_hermes_profile(runtime_profile)
         self._builtin_mcp_handlers: dict[str, Any] | None = None
 
         # Resolve stream-loop timeouts (kwarg → env var → class default;
@@ -226,6 +262,7 @@ class HermesCliRuntime(AgentRuntime):
             cli_path=self._cli_path,
             permission_mode=self._permission_mode,
             model=model,
+            runtime_profile=self._runtime_profile,
             cwd=self._cwd,
             startup_output_timeout_seconds=self._startup_output_timeout_seconds,
             stdout_idle_timeout_seconds=self._stdout_idle_timeout_seconds,
@@ -391,6 +428,7 @@ class HermesCliRuntime(AgentRuntime):
             shutdown_timeout=self._process_shutdown_timeout_seconds,
             logger=log,
             log_namespace=self._log_namespace,
+            workspace=self._cwd,
         )
 
     async def execute_task(
@@ -450,7 +488,10 @@ class HermesCliRuntime(AgentRuntime):
 
         full_prompt = self._compose_prompt(prompt, system_prompt, tools)
 
-        args = [self._cli_path, "chat"]
+        args = [self._cli_path]
+        if self._runtime_profile:
+            args.extend(["--profile", self._runtime_profile])
+        args.append("chat")
         if handle and handle.native_session_id:
             args.extend(["--resume", handle.native_session_id])
 
@@ -517,10 +558,15 @@ class HermesCliRuntime(AgentRuntime):
 
         if returncode != 0:
             failure_content = error or output or f"Hermes exited with code {returncode}"
+            failure_metadata = classify_subprocess_failure(failure_content, exit_code=returncode)
+            if failure_metadata["error_type"] == "RuntimeExecutionError" and (
+                _MISSING_PROFILE_CREDENTIALS.search(failure_content)
+            ):
+                failure_metadata["error_type"] = "HermesConfigurationError"
             yield AgentMessage(
                 type="result",
                 content=f"Hermes execution failed:\n{failure_content}",
-                data=classify_subprocess_failure(failure_content, exit_code=returncode),
+                data=failure_metadata,
                 resume_handle=handle,
             )
             return
@@ -720,22 +766,8 @@ class HermesCliRuntime(AgentRuntime):
         intercept: Resolved,
         current_handle: RuntimeHandle | None,
     ) -> dict[str, Any]:
-        """Build MCP arguments, preserving interview sessions across turns."""
-        if intercept.mcp_tool != "ouroboros_interview" or current_handle is None:
-            return dict(intercept.mcp_args)
-
-        session_id = current_handle.metadata.get(_INTERVIEW_SESSION_METADATA_KEY)
-        if not isinstance(session_id, str) or not session_id.strip():
-            return dict(intercept.mcp_args)
-
-        # Resume turn: drop initial_context so InterviewHandler branches on
-        # session_id instead of starting a new interview.
-        arguments: dict[str, Any] = dict(intercept.mcp_args)
-        arguments.pop("initial_context", None)
-        arguments["session_id"] = session_id.strip()
-        if intercept.first_argument is not None:
-            arguments["answer"] = intercept.first_argument
-        return arguments
+        """Build arguments through the shared interview transition contract."""
+        return InterviewSessionTransition(intercept, current_handle).tool_arguments()
 
     def _build_resume_handle(
         self,
@@ -743,27 +775,13 @@ class HermesCliRuntime(AgentRuntime):
         intercept: Resolved,
         tool_result: Any,
     ) -> RuntimeHandle | None:
-        """Attach interview session metadata to the runtime handle."""
-        if intercept.mcp_tool != "ouroboros_interview":
-            return current_handle
-
-        session_id = tool_result.meta.get("session_id")
-        if not isinstance(session_id, str) or not session_id.strip():
-            return current_handle
-
-        metadata = dict(current_handle.metadata) if current_handle is not None else {}
-        metadata[_INTERVIEW_SESSION_METADATA_KEY] = session_id.strip()
-        updated_at = datetime.now(UTC).isoformat()
-
-        if current_handle is not None:
-            return replace(current_handle, metadata=metadata, updated_at=updated_at)
-
-        return RuntimeHandle(
+        """Retain session-local interview state through the shared transition."""
+        return InterviewSessionTransition(intercept, current_handle).resume_handle(
+            tool_result.meta,
             backend=self.runtime_backend,
             cwd=self.working_directory,
             approval_mode=self.permission_mode,
-            updated_at=updated_at,
-            metadata=metadata,
+            log_namespace="hermes_runtime",
         )
 
     async def _dispatch_skill_intercept_locally(

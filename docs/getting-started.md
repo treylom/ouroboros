@@ -123,6 +123,11 @@ ouroboros setup --runtime codex
 ouroboros init start "Build a task management CLI"
 ```
 
+For release installs, the setup-managed Codex `uvx` MCP command pins
+`ouroboros-ai[mcp]` to the installed setup version. After upgrading Ouroboros,
+rerun setup to refresh that managed pin. Source/dev installs continue to use
+the current Python environment.
+
 > **Note:** The standalone CLI interview is invoked via `ouroboros init start "your context"` (not `ooo interview`, which is Claude Code-specific). The interview flow is identical across both tools. Power users can also author seed YAML files directly — see the [Seed Authoring Guide](guides/seed-authoring.md).
 
 > **Tip:** `ouroboros run` requires a path to a seed YAML file as a positional argument (e.g., `ouroboros run ~/.ouroboros/seeds/seed_<id>.yaml`).
@@ -268,13 +273,14 @@ installation fails, see
 
 | Path | Requirements |
 |------|-------------|
-| All runner sessions | Git >= 2.36.0 on PATH. Project identity requires the unambiguous `worktree list --porcelain -z` topology grammar even for a non-Git local workspace; an older or unrepresentable Git version is a non-retryable configuration error. |
+| All runner sessions | Git on PATH. Git >= 2.36.0 gives Project Map its full topology identity (the unambiguous `worktree list --porcelain -z` grammar). With older Git, direct runs (`--worktree-policy current` or no managed worktree) still execute and use the conservative current-directory identity; managed task worktrees still require Git >= 2.36.0, and `ooo run` refuses one up front on older Git (set `orchestrator.use_worktrees: false` to run in the checkout). An unrepresentable Git version is a non-retryable configuration error. |
 | Claude Code (`ooo`) | Claude Code with plugin support |
 | Standalone CLI (`ouroboros`) | Python >= 3.12, API key (Anthropic or OpenAI) |
 | Codex CLI backend | Python >= 3.12, `npm install -g @openai/codex`, and a signed-in Codex CLI account with access to a Codex-supported model |
 | OpenCode backend | Python >= 3.12, `opencode` on PATH, provider configured in OpenCode |
 | Kiro CLI backend | Python >= 3.12, `kiro-cli` on PATH (signed in to Kiro), plus `pipx install 'ouroboros-ai[mcp]'` or `uv tool install 'ouroboros-ai[mcp]'`. Then `ouroboros setup --runtime kiro` registers the isolated Ouroboros MCP server in `~/.kiro/settings/mcp.json` |
 | GitHub Copilot CLI backend | Python >= 3.12, `copilot` on PATH, `gh` on PATH (`gh auth login`), plus `pipx install 'ouroboros-ai[mcp]'` or `uv tool install 'ouroboros-ai[mcp]'`. Then `ouroboros setup --runtime copilot` live-discovers available models, picks a default, and registers the Ouroboros MCP server in `~/.copilot/mcp-config.json` |
+| GitHub Copilot ACP transport (experimental) | Same `copilot` backend and setup, plus a Copilot version supporting `--acp --stdio` (Linux smoke-tested with CLI 1.0.83) and working Copilot account authorization. Opt in with `ouroboros config set orchestrator.copilot_transport acp` for live tool/text events. No GUI or network listener is required. Native resume is not implemented; history/replay remains available. See [the ACP guide](runtime-guides/copilot-acp.md). |
 | Pi CLI backend | Python >= 3.12, `pi` on PATH or `orchestrator.pi_cli_path` configured. Use `runtime_backend: pi` for workflow execution. Use `llm.backend: pi` only when authoring/evaluation flows can accept Pi's adapter-level JSON extraction and schema validation rather than native `--output-schema` enforcement |
 | OMP CLI backend | Python >= 3.12, `omp` on PATH or `orchestrator.omp_cli_path` configured. Use `runtime_backend: omp` for workflow execution; OMP resumes sessions with its native `--resume` flag and picks its own configured model (roles `smol`/`slow`/`plan`) unless an explicit `--model` override is passed. `ouroboros setup --runtime omp` also installs the interactive `ooo` bridge into `~/.omp/agent/extensions/` |
 
@@ -402,7 +408,7 @@ ooo run
 
 > **CLI equivalent:** `ouroboros run ~/.ouroboros/seeds/seed_abc123.yaml` (requires the seed file path as a positional argument)
 
-Ouroboros decomposes the seed into tasks via the Double Diamond (Discover -> Define -> Design -> Deliver) and executes them through your configured runtime backend.
+Ouroboros fans the seed's acceptance criteria out in dependency order, splitting an AC only when it spans independently verifiable units, and executes them through your configured runtime backend.
 
 ### Step 3: Monitor
 

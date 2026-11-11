@@ -1,5 +1,10 @@
 # OMP CLI Runtime
 
+LLM completion usage is summed from assistant messages in the final per-run
+`agent_end` snapshot. Earlier message/turn completion events repeat these
+messages and are not counted again. Additive cache tokens are preserved as
+`unallocated_tokens`; cache-retention and reasoning breakdowns are not added twice.
+
 Run Ouroboros workflow execution on top of the locally installed OMP ("Oh My
 Pi", the `omp` binary) CLI.
 
@@ -112,8 +117,37 @@ result.
 
 Ouroboros parses the initial `session` event into a `RuntimeHandle`, streams
 `message_update` `text_delta` events as assistant output, and reads terminal
-assistant text from `message_end`, `turn_end`, or `agent_end` events — the
-same event lifecycle as Pi JSON mode.
+assistant text from `message_end`, `turn_end`, or `agent_end` events.
+`tool_execution_start` and `tool_execution_end` become correlated tool calls
+and results; `tool_execution_update` is not completion evidence.
+
+### Verification Support
+
+OMP tool execution evidence is supported (verified with OMP 18.7.0). Native
+`bash` calls are normalized to `Bash`, retaining the command input and
+`toolCallId`. Completion messages carry the result text, error verdict, and
+command exit status through to `execution.tool.completed` in the execution
+journal. The verifier can match `commands_run` and supported `tests_passed`
+claims against these runtime messages rather than trusting the worker's final
+summary. A command absent from the transcript remains unsupported.
+
+OMP omits `details.exitCode` on successful synchronous Bash completions; an
+explicit, valid `isError: false` completion with a `result.details` object is
+normalized to exit status zero. An explicitly present empty object is valid;
+an absent or non-object `result.details` is incomplete evidence and cannot
+establish success.
+Nonzero exits, error flags, and malformed verdicts do not become successful
+test evidence. A background-job launch is not proof of a completed command:
+its `details.async` result does not grant a successful exit, even when the
+launch itself reports `isError: false`. Run verification commands synchronously
+when their completion must support a test claim.
+
+Check-package constructor calls use `omp --mode json --no-session ...` so
+held-out inputs and expected values are not persisted in an OMP session.
+The adapter does not log reply text. This switch applies only to the
+constructor's runtime instance; ordinary workers retain session persistence
+and targeted resume. As with other runtimes, the constructor still requires a
+valid structured reply before a check package can be built.
 
 ## What `ooo` Means With OMP
 
@@ -288,3 +322,7 @@ first scheduled ACs, attention, and terminal assurance. The main session stays
 available and selects the relevant AC semantically rather than asking the user
 for IDs. English is the canonical instruction language; the host renders the UX
 naturally in the current conversation language.
+
+After native completion or stdout EOF, the runtime gives the worker five seconds
+to exit and close stderr. If that exit phase stalls, it terminates the worker
+and returns a `TimeoutError`; active stdout startup and idle budgets are unchanged.

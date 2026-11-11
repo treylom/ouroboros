@@ -23,6 +23,7 @@ Usage:
     api_key = credentials.providers["openai"].api_key
 """
 
+from ouroboros.config.copilot import get_copilot_acp_fallback, get_copilot_transport
 from ouroboros.config.loader import (
     MAX_USAGE_LIMIT_PAUSE_SECONDS,
     config_exists,
@@ -66,6 +67,7 @@ from ouroboros.config.loader import (
     get_llm_permission_mode,
     get_max_parallel_workers,
     get_mechanical_detector_model,
+    get_megacode_cli_path,
     get_n_version_tournament_enabled,
     get_native_session_index_enabled,
     get_omp_cli_path,
@@ -87,6 +89,7 @@ from ouroboros.config.loader import (
     get_zcode_cli_path,
     load_config,
     load_credentials,
+    resolve_megacode_cli_path,
     resolve_omp_cli_path,
 )
 from ouroboros.config.models import (
@@ -117,6 +120,7 @@ from ouroboros.config.models import (
     get_default_config,
     get_default_credentials,
 )
+from ouroboros.config.policy_notice import policy_notice
 
 __all__ = [
     # Models
@@ -146,6 +150,7 @@ __all__ = [
     "RuntimeProfileConfig",
     # Loader functions
     "default_execution_efficiency_mode",
+    "policy_notice",
     "load_config",
     "load_credentials",
     "create_default_config",
@@ -179,6 +184,8 @@ __all__ = [
     "get_mechanical_detector_model",
     "get_codex_cli_path",
     "get_copilot_cli_path",
+    "get_copilot_transport",
+    "get_copilot_acp_fallback",
     "get_antigravity_cli_path",
     "get_gemini_cli_path",
     "get_gjc_cli_path",
@@ -194,6 +201,8 @@ __all__ = [
     "get_dsh_config_path",
     "get_omp_cli_path",
     "resolve_omp_cli_path",
+    "get_megacode_cli_path",
+    "resolve_megacode_cli_path",
     "get_pi_cli_path",
     "get_zcode_cli_path",
     "get_qa_model",

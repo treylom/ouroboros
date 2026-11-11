@@ -35,7 +35,8 @@ You can also override the configured backend with the `OUROBOROS_AGENT_RUNTIME` 
 > contract lives in the per-runtime guide rather than as a column here:
 > Antigravity (`agy`) → [runtime-guides/antigravity.md](runtime-guides/antigravity.md);
 > Grok (`grok`) → [runtime-guides/grok.md](runtime-guides/grok.md);
-> Zcode (`zcode`) → [runtime-guides/zcode.md](runtime-guides/zcode.md).
+> Zcode (`zcode`) → [runtime-guides/zcode.md](runtime-guides/zcode.md);
+> Megacode harness (`harness`) → [runtime-guides/megacode.md](runtime-guides/megacode.md).
 
 ### Workflow Layer (identical across runtimes)
 
@@ -69,6 +70,24 @@ These capabilities depend on the runtime backend's native features and execution
 
 ### Parameter handling (negotiation)
 
+#### Copilot transport comparison
+
+Both rows select backend `copilot`; set `orchestrator.copilot_transport` to choose
+the transport. The existing Copilot columns above describe the default CLI.
+
+| Transport | Invocation | Live runtime events | Tool restriction | Permissions | Native resume |
+|-----------|------------|---------------------|------------------|-------------|---------------|
+| `cli` (default) | `copilot -p` | No first-class ACP activity | Existing CLI policy / prompt guidance | Existing Copilot CLI mapping | No |
+| `acp` (experimental) | `copilot --acp --stdio` | Text deltas, tool starts/progress/results, permission audit, final result; persisted through existing events | Native exact envelope, including empty | One-shot ACP decisions; bypass capped to acceptEdits (`translated`) | No |
+
+ACP reuses skill dispatch, model/profile selection and translated system prompts.
+Its `structured_output=True` capability means structured runtime events, not a
+JSON output-schema flag. LLM-only calls still use `CopilotCliLLMAdapter`. See the
+[ACP guide](runtime-guides/copilot-acp.md) for opt-in configuration, bounded
+read-only fallback, authentication, and correlation limitations.
+
+#### Execution parameters
+
 Beyond the feature flags above, `RuntimeCapabilities` declares how each runtime honors the
 execution **parameters** Ouroboros passes to `execute_task` — `system_prompt`, the `tools`
 allow-list, and `permission_mode`. Each is one of:
@@ -91,9 +110,10 @@ allow-list, and `permission_mode`. Each is one of:
 > Gemini, Goose, Copilot, OpenCode, and Hermes also render requested tool
 > allow-lists only as prompt guidance, so `tools` is translated rather than a
 > native runtime allow-list when the list is non-empty. An explicit empty
-> allow-list (`tools=[]`) cannot be translated by those prompt-only composers
-> because no tool names are rendered; the orchestrator reports that no-tools
-> restriction as `ignored` for observability. Kiro maps `permission_mode` onto
+> allow-list (`tools=[]`) adds explicit no-tools advice through the shared Codex
+> prompt composer, including the Antigravity runtime. This is advisory text, not
+> enforcement: the orchestrator continues reporting the no-tools restriction as
+> `ignored` for runtimes without a native restriction. Kiro maps `permission_mode` onto
 > coarse `--trust-*` flags. When full bypass is requested, `--trust-all-tools`
 > takes precedence and any simultaneous tool envelope remains prompt guidance.
 > OpenCode and Hermes translate full bypass onto
@@ -122,8 +142,11 @@ Per-AC investment decisions are separately observable. The executor emits
 `execution.ac.effort_routed` for the enforced or advised effort result, and
 `execution.ac.model_routed` for model-tier resolution. A decomposed child cannot
 lower its model tier unless the routing call receives explicit trusted
-decomposition authorization. Current live decomposition supplies no such issuer,
-so live children stay at the base tier.
+decomposition authorization and the run is in adaptive efficiency mode. Live
+decomposition issues that authorization when a generic split passes structural
+and semantic verification, so on a mapped backend those children start one tier
+below the base tier (never below frugal); untrusted splits and quality-first
+runs stay at the base tier.
 
 ### Integration Surface (UX differences)
 
@@ -140,7 +163,7 @@ so live children stay at the base tier.
 Regardless of runtime backend, every Ouroboros workflow:
 
 1. **Starts from the same Seed file** -- YAML specification with goal, constraints, acceptance criteria, ontology, and evaluation principles.
-2. **Follows the same orchestration pipeline** -- the 6-phase pipeline (Big Bang → PAL Router → Double Diamond → Resilience → Evaluation → Secondary Loop) is runtime-agnostic. See [Architecture](architecture.md#the-six-phases) for the canonical phase definitions.
+2. **Follows the same orchestration pipeline** -- the 6-phase pipeline (Big Bang → PAL Router → Execution → Resilience → Evaluation → Secondary Loop) is runtime-agnostic. See [Architecture](architecture.md#the-six-phases) for the canonical phase definitions.
 3. **Produces the same event stream** -- all events are stored in the shared SQLite event store with identical schemas.
 4. **Evaluates against the same criteria** -- acceptance criteria and evaluation principles are applied uniformly.
 5. **Reports through the same interfaces** -- CLI output, TUI dashboard, and event logs work identically.

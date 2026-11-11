@@ -83,6 +83,8 @@ UNTRUSTED_ENV_DENYLIST = frozenset(
         "OUROBOROS_CLI_PATH",
         "OUROBOROS_CODEX_CLI_PATH",
         "OUROBOROS_COPILOT_CLI_PATH",
+        "OUROBOROS_COPILOT_TRANSPORT",
+        "OUROBOROS_COPILOT_ACP_FALLBACK",
         "OUROBOROS_KIRO_CLI_PATH",
         "OUROBOROS_OPENCODE_CLI_PATH",
         "OUROBOROS_HERMES_CLI_PATH",
@@ -95,6 +97,7 @@ UNTRUSTED_ENV_DENYLIST = frozenset(
         "OUROBOROS_GROK_CLI_PATH",
         "OUROBOROS_OUROCODE_CLI_PATH",
         "OUROBOROS_ZCODE_CLI_PATH",
+        "OUROBOROS_MEGACODE_CLI_PATH",
         "OUROBOROS_DSH_CLI_PATH",
         # POSIX shell the orchestrator runs every AC verify_command through.
         # A repo .env pointing this at its own binary would execute arbitrary
@@ -131,6 +134,9 @@ UNTRUSTED_ENV_DENYLIST = frozenset(
         "GJC_CODING_AGENT_DIR",
         "GJC_CONFIG_DIR",
         "PI_CONFIG_DIR",
+        # Hermes hosting-profile roots select the spawned CLI's configuration.
+        "HERMES_HOME",
+        "HERMES_REAL_HOME",
         # OMP (Oh My Pi) resolves its agent dir — sessions, extensions, and rules
         # loaded into every spawned session — from this var (see `omp --help`).
         # Same spawned-CLI discovery-root class as GJC/PI above: an untrusted
@@ -166,6 +172,9 @@ UNTRUSTED_ENV_DENYLIST = frozenset(
         # Claude Code resolves settings.json (hooks, permission mode, MCP
         # servers) from this root; same class as CODEX_HOME.
         "CLAUDE_CONFIG_DIR",
+        # Megacode harness config root, inherited by both runtime workers
+        # and LLM completions. Only trusted sources may select this config.
+        "HARNESS_HOME",
         # Platform home selectors also choose Ouroboros' trusted config root.
         # A project .env must not turn a repository directory into ~/.ouroboros.
         "HOME",
@@ -224,6 +233,16 @@ UNTRUSTED_ENV_DENYLIST = frozenset(
         # turn off the verification layer that judges its own changes, nor
         # decide whether model-written checks execute.
         "OUROBOROS_CHECK_PACKAGE",
+        # ``ooo auto`` requester command (auto/requester.py): the value names a
+        # program auto runs for each routed interview question, the same
+        # executable-selection class as the CLI paths above. The timeout is
+        # kept beside it so a cloned repo cannot shape how long it runs.
+        "OUROBOROS_AUTO_REQUESTER_COMMAND",
+        "OUROBOROS_AUTO_REQUESTER_TIMEOUT_SECONDS",
+        # ``ooo auto`` investigator call cap and hang guard (auto/investigator.py): 0 turns
+        # off the repository reading, so a cloned repo must not set it.
+        "OUROBOROS_AUTO_INVESTIGATOR_MAX_CALLS",
+        "OUROBOROS_AUTO_INVESTIGATOR_CALL_TIMEOUT_SECONDS",
         "DO_NOT_TRACK",
         "CI",
         "GITHUB_ACTIONS",

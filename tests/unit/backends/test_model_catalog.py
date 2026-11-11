@@ -65,7 +65,7 @@ def test_claude_catalog_lists_shipped_defaults_first() -> None:
 def test_codex_catalog_offers_known_models_after_sentinel() -> None:
     choices = mc.model_choices("codex")
     assert choices[0] == mc.DEFAULT_MODEL_SENTINEL
-    assert "gpt-5-codex" in choices
+    assert "gpt-6.1-sol" in choices
 
 
 def test_default_model_sentinel_support_follows_backend_contract() -> None:
@@ -97,6 +97,50 @@ def test_ourocode_catalog_lists_supported_acp_selectors() -> None:
 def test_unknown_backend_raises() -> None:
     with pytest.raises(ValueError, match="No model catalog"):
         mc.get_model_catalog("not-a-backend")
+
+
+@pytest.mark.parametrize(
+    ("prefix", "flash", "m3"),
+    [
+        ("minimax/", "MiniMax-M3.1-Flash", "MiniMax-M3"),
+        ("minimax-cn/", "MiniMax-M3.1-Flash", "MiniMax-M3"),
+        ("openrouter/minimax/", "minimax-m3.1-flash:free", "minimax-m3"),
+        ("opencode/", "minimax-m3.1-flash-free", "minimax-m3"),
+    ],
+)
+def test_recommended_minimax_models_preserve_availability_and_other_routes(prefix, flash, m3):
+    models = (
+        "other/model",
+        prefix + m3,
+        prefix + "MiniMax-M2.7",
+        prefix + "MiniMax-Text-01",
+        prefix + "abab6.5s-chat",
+        prefix + flash,
+        "minimax/speech-02-hd",
+        "opencode/minimax-music-01",
+        "custom/MiniMax-M2.7",
+    )
+    assert mc.recommended_cli_models("opencode", models) == (
+        "other/model",
+        prefix + flash,
+        prefix + m3,
+        "minimax/speech-02-hd",
+        "opencode/minimax-music-01",
+        "custom/MiniMax-M2.7",
+    )
+    assert mc.recommended_cli_models("opencode", (prefix + m3,)) == (prefix + m3,)
+    assert mc.recommended_cli_models("opencode", (prefix + "MiniMax-M2.7",)) == ()
+    assert mc.recommended_cli_models("other", models) == models
+
+
+def test_gateway_flash_ids_are_not_interchangeable():
+    models = (
+        "openrouter/minimax/minimax-m3.1-flash",
+        "opencode/minimax-m3.1-flash",
+        "openrouter/minimax/minimax-m3.1-flash:free",
+        "opencode/minimax-m3.1-flash-free",
+    )
+    assert mc.recommended_cli_models("opencode", models) == models[2:]
 
 
 def test_refresh_models_without_list_args_degrades_to_none() -> None:

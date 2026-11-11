@@ -19,6 +19,8 @@ import shutil
 import subprocess
 from typing import Any
 
+import anyio
+
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.session_signal import SessionSignalCapabilities
 from ouroboros.core.types import Result
@@ -41,6 +43,7 @@ from ouroboros.providers.codex_cli_stream import (
     parse_json_event,
     terminate_runtime_process,
 )
+from ouroboros.providers.pi_message_error import assistant_message_error
 
 log = get_logger(__name__)
 
@@ -430,14 +433,7 @@ class PiRuntime:
         """
 
         def from_message(message: Any) -> str | None:
-            if not isinstance(message, dict) or message.get("role") != "assistant":
-                return None
-            if message.get("stopReason") != "error":
-                return None
-            error = message.get("errorMessage") or message.get("error")
-            if isinstance(error, str) and error.strip():
-                return error.strip()
-            return self._extract_text_from_message(message)
+            return assistant_message_error(message, self._extract_text_from_message)
 
         event_type = event.get("type")
         if event_type in {"message_start", "message_end", "turn_end"}:
@@ -458,6 +454,7 @@ class PiRuntime:
             shutdown_timeout=self._process_shutdown_timeout_seconds,
             logger=log,
             log_namespace=self._log_namespace,
+            workspace=self._cwd,
         )
 
     # -- RuntimeHandle management ------------------------------------------
@@ -690,16 +687,27 @@ class PiRuntime:
                 resume_handle=current_handle,
             )
             return
-        except asyncio.CancelledError:
-            if process is not None:
+        else:
+            from ouroboros.providers.codex_cli_stream import wait_runtime_exit
+
+            try:
+                returncode, stderr_lines = await wait_runtime_exit(
+                    process,
+                    stderr_task,
+                    shutdown_timeout=self._process_shutdown_timeout_seconds,
+                    display_name=self._display_name,
+                )
+            except TimeoutError as exc:
                 await self._terminate_process(process)
                 process_terminated = True
-            raise
-        else:
-            returncode = await process.wait()
+                yield AgentMessage(
+                    type="result",
+                    content=str(exc),
+                    data={"subtype": "error", "error_type": "TimeoutError"},
+                    resume_handle=current_handle,
+                )
+                return
             process_finished = True
-
-            stderr_lines = await stderr_task if stderr_task else []
             if returncode != 0 or pending_error_content:
                 stderr_text = "\n".join(stderr_lines).strip()
                 if returncode == 0 and pending_error_content:
@@ -735,17 +743,19 @@ class PiRuntime:
                     resume_handle=current_handle,
                 )
         finally:
-            if process is not None:
-                if (
-                    not process_finished
-                    and not process_terminated
-                    and getattr(process, "returncode", None) is None
-                ):
-                    await self._terminate_process(process)
-            if stderr_task is not None and not stderr_task.done():
-                stderr_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await stderr_task
+            with anyio.CancelScope(shield=True):
+                if process is not None:
+                    if (
+                        not process_finished
+                        and not process_terminated
+                        and getattr(process, "returncode", None) is None
+                    ):
+                        await self._terminate_process(process)
+                if stderr_task is not None and not stderr_task.done():
+                    stderr_task.cancel()
+                    with anyio.move_on_after(self._process_shutdown_timeout_seconds):
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await stderr_task
 
     async def execute_task_to_result(
         self,

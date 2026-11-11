@@ -46,9 +46,9 @@ from ouroboros.providers.base import (
     CompletionResponse,
     Message,
     MessageRole,
-    UsageInfo,
 )
 from ouroboros.providers.codex_cli_stream import iter_stream_lines, terminate_process
+from ouroboros.providers.gemini_usage import gemini_usage_from_stats
 from ouroboros.providers.profiles import resolve_completion_profile_result
 from ouroboros.runtime.child_env import DEFAULT_OUROBOROS_STRIP_KEYS, build_child_env
 
@@ -71,8 +71,9 @@ _EXIT_INPUT_ERROR = 42
 _EXIT_CONFIG_ERROR = 52
 _EXIT_TURN_LIMIT = 53
 
-# Default model when none is specified
-_DEFAULT_MODEL = "gemini-2.5-flash"
+# Keep the internal sentinel until command construction so automatic completion
+# follows the installed CLI's own configured/default model selection.
+_DEFAULT_MODEL = "default"
 
 # Maximum response size to guard against runaway output
 _MAX_RESPONSE_BYTES = MAX_LLM_RESPONSE_LENGTH
@@ -96,7 +97,7 @@ class GeminiCLIAdapter:
     Attributes:
         cli_path: Path to the ``gemini`` binary.  Resolved from constructor,
             ``OUROBOROS_GEMINI_CLI_PATH`` environment variable or ``PATH``.
-        model: Gemini model name (e.g. ``gemini-2.5-flash``).
+        model: Gemini model name, or ``default`` for CLI-owned selection.
         cwd: Working directory for the subprocess.
         timeout: Maximum seconds to wait for a response.  ``None`` means no
             limit.
@@ -124,7 +125,8 @@ class GeminiCLIAdapter:
         Args:
             cli_path: Explicit path to the ``gemini`` binary.  Falls back to
                 ``OUROBOROS_GEMINI_CLI_PATH`` env var, then ``PATH``.
-            model: Gemini model identifier.  Defaults to ``gemini-2.5-flash``.
+            model: Optional Gemini model identifier.  When omitted, leaves
+                model selection to the Gemini CLI.
             cwd: Working directory for the subprocess.
             max_turns: Maximum conversational turns (kept for API symmetry; the
                 Gemini CLI non-interactive mode always runs a single turn).
@@ -335,7 +337,9 @@ class GeminiCLIAdapter:
         model_name: str | None = None
         final_response: str | None = None
         error_seen: str | None = None
+        reported_stats: object = None
         total_bytes = 0
+        json_lines: list[str] = []
 
         async for line in iter_stream_lines(process.stdout, provider=self._provider_name):
             line = line.strip()
@@ -354,14 +358,27 @@ class GeminiCLIAdapter:
                     )
                 )
 
+            if json_lines:
+                json_lines.append(line)
+                candidate = "\n".join(json_lines)
+            else:
+                candidate = line
             try:
-                event = json.loads(line)
+                event = json.loads(candidate)
             except json.JSONDecodeError:
-                # Plain-text line — accumulate it (fallback for non-JSON output)
-                content_parts.append(line)
+                if not json_lines and line == "{":
+                    json_lines.append(line)
+                elif not json_lines:
+                    content_parts.append(("\n" if content_parts else "") + line)
+                continue
+            json_lines.clear()
+            if not isinstance(event, dict):
+                content_parts.append(("\n" if content_parts else "") + candidate)
                 continue
 
             event_type = event.get("type", "")
+            if event_type == "result" or (not event_type and "response" in event):
+                reported_stats = event.get("stats")
 
             # Handle batch JSON format (--output-format json): a single
             # object with "response", "stats" and "error" fields, no "type".
@@ -384,8 +401,9 @@ class GeminiCLIAdapter:
             elif event_type == "message":
                 role = event.get("role", "")
                 text = event.get("content", "")
-                if role == "model" and text:
-                    content_parts.append(text)
+                if role in {"assistant", "model"} and isinstance(text, str) and text:
+                    separator = "" if event.get("delta") is True or not content_parts else "\n"
+                    content_parts.append(separator + text)
                     if self._on_message and text.strip():
                         self._on_message("thinking", text.strip())
 
@@ -427,6 +445,9 @@ class GeminiCLIAdapter:
                     err = event["error"]
                     error_seen = err.get("message", str(err))
 
+        if json_lines:
+            content_parts.append(("\n" if content_parts else "") + "\n".join(json_lines))
+
         returncode = await process.wait()
 
         # A non-zero exit code always means failure.
@@ -452,7 +473,7 @@ class GeminiCLIAdapter:
             )
 
         # Prefer the aggregated result event; fall back to accumulated parts.
-        content = final_response if final_response is not None else "\n".join(content_parts)
+        content = final_response if final_response is not None else "".join(content_parts)
 
         # Only treat stream-level errors as fatal when there is no usable
         # content.  Non-fatal warnings (e.g. deprecation notices) may appear
@@ -496,11 +517,7 @@ class GeminiCLIAdapter:
             CompletionResponse(
                 content=content,
                 model=model_name or self._model,
-                usage=UsageInfo(
-                    prompt_tokens=0,  # Gemini CLI does not expose token counts
-                    completion_tokens=0,
-                    total_tokens=0,
-                ),
+                usage=gemini_usage_from_stats(reported_stats),
                 finish_reason="stop",
                 raw_response={"session_id": session_id},
             )
@@ -547,11 +564,10 @@ class GeminiCLIAdapter:
             str(self._cli_path),
             "--output-format",
             output_format,
-            "--model",
-            model,
-            "-p",
-            prompt,
         ]
+        if model and model != _DEFAULT_MODEL:
+            cmd.extend(["--model", model])
+        cmd.extend(["-p", prompt])
 
         # Forward generation controls that the Gemini CLI accepts.
         # Unsupported controls are logged so callers can diagnose parity gaps.

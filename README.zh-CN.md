@@ -57,20 +57,23 @@ irm https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.ps1 | i
 
 <p align="center"><sub>一行命令完成安装。然后在你的编码 agent 里运行一次 <code>ooo setup</code>，详见<a href="#快速开始">快速开始</a>。</sub></p>
 
-<p align="center"><sub><b>六次各自独立的运行，六个宿主。任务不同是故意的——共享的是引擎，不是提示词</b></sub></p>
+<p align="center"><sub><b>七次各自独立的运行，七个宿主。任务不同是故意的——共享的是引擎，不是提示词</b></sub></p>
 
 <table align="center">
 <tr>
-<td align="center" width="50%"><img src="./docs/images/ooo-interview.gif" width="440" alt="Terminal recording of the ouroboros CLI interview reporting an ambiguity score"><br><sub><b>终端 CLI</b> — 待办管理 CLI 任务，<code>ouroboros init start</code> 追问顺序与范围，然后报出模糊度分数</sub></td>
-<td align="center" width="50%"><img src="./docs/images/host-codex.gif" width="440" alt="Screen recording of the ChatGPT app calling Ouroboros as an integration"><br><sub><b>ChatGPT (Codex)</b> — 视频发布流水线任务，作为 integration 被调用：提问、顾问轨、模糊度台账都在同一屏</sub></td>
+<td align="center" width="50%"><img src="./docs/images/ooo-interview.gif" alt="Terminal recording of the ouroboros CLI interview reporting an ambiguity score"><br><sub><b>终端 CLI</b> — 待办管理 CLI 任务，<code>ouroboros init start</code> 追问顺序与范围，然后报出模糊度分数</sub></td>
+<td align="center" width="50%"><img src="./docs/images/host-codex.gif" alt="Screen recording of the ChatGPT app calling Ouroboros as an integration"><br><sub><b>ChatGPT (Codex)</b> — 视频发布流水线任务，作为 integration 被调用：提问、顾问轨、模糊度台账都在同一屏</sub></td>
 </tr>
 <tr>
-<td align="center" width="50%"><img src="./docs/images/host-claude.gif" width="440" alt="Screen recording of Claude Code running six Ouroboros interview advisory lanes in parallel"><br><sub><b>Claude Code</b> — YouTube 自动化任务，六条顾问轨并行跑完，访谈才提交结果</sub></td>
-<td align="center" width="50%"><img src="./docs/images/host-hermes.gif" width="440" alt="Screen recording of a Discord bot running the Ouroboros interview and reporting a final ambiguity of 0.15"><br><sub><b>Hermes (Discord)</b> — 卡丁车游戏任务跑在聊天机器人里，收在 <code>Final ambiguity: 0.15</code></sub></td>
+<td align="center" width="50%"><img src="./docs/images/host-claude.gif" alt="Screen recording of Claude Code running six Ouroboros interview advisory lanes in parallel"><br><sub><b>Claude Code</b> — YouTube 自动化任务，六条顾问轨并行跑完，访谈才提交结果</sub></td>
+<td align="center" width="50%"><img src="./docs/images/host-hermes.gif" alt="Screen recording of a Discord bot running the Ouroboros interview and reporting a final ambiguity of 0.15"><br><sub><b>Hermes (Discord)</b> — 卡丁车游戏任务跑在聊天机器人里，收在 <code>Final ambiguity: 0.15</code></sub></td>
 </tr>
 <tr>
-<td align="center" width="50%"><img src="./docs/images/host-kiro.gif" width="440" alt="Kiro CLI 运行 Ouroboros 访谈的十倍速屏幕录像"><br><sub><b>Kiro</b> — 在 Kiro CLI 中运行 Ouroboros 访谈流程，把模糊需求收敛为结构清晰、可验证的 Seed</sub></td>
-<td align="center" width="50%"><img src="./docs/images/host-dsh.gif" width="440" alt="Screen recording of DeepSeek Harness calling the Ouroboros interview tool and submitting advisory fan-out results"><br><sub><b>DeepSeek Harness</b> — 一个 OSS 趋势外联脚本，跑在 dsh 聊天里：<code>mcp__ouroboros__ouroboros_interview</code> 逐轮提问，轮次之间提交 fan-out 结果</sub></td>
+<td align="center" width="50%"><img src="./docs/images/host-dsh.gif" alt="Screen recording of DeepSeek Harness calling the Ouroboros interview tool and submitting advisory fan-out results"><br><sub><b>DeepSeek Harness</b> — 一个 OSS 趋势外联脚本，跑在 dsh 聊天里：<code>mcp__ouroboros__ouroboros_interview</code> 逐轮提问，轮次之间提交 fan-out 结果</sub></td>
+<td align="center" width="50%"><img src="./docs/images/host-kiro.gif" alt="Kiro CLI 运行 Ouroboros 访谈的十倍速屏幕录像"><br><sub><b>Kiro</b> — 在 Kiro CLI 中运行 Ouroboros 访谈流程，把模糊需求收敛为结构清晰、可验证的 Seed</sub></td>
+</tr>
+<tr>
+<td align="center" colspan="2"><img src="./docs/images/host-antigravity.gif" width="50%" alt="Antigravity 运行 Ouroboros 访谈并提交所选答案的屏幕录像"><br><sub><b>Antigravity</b> — YouTube 发布自动化访谈：询问自动化范围、运行顾问轨，并提交选中的答案</sub></td>
 </tr>
 </table>
 
@@ -316,7 +319,7 @@ ouroboros uninstall
 ```
 interview  ->  苏格拉底式提问揭示了 12 条隐藏假设
 seed       ->  把回答凝结成不可变规约（Ambiguity: 0.15）
-run        ->  按 Double Diamond 分解执行
+run        ->  按依赖顺序把验收标准分发给智能体执行
 evaluate   ->  三阶段验证：Mechanical -> Semantic -> Consensus
 ```
 
@@ -357,7 +360,7 @@ AI 编码工具本身很强 —— 但当输入不清晰时，它们解的是**�
 | :------------ | :-------------------------------------------------------------------- |
 | **Interview** | 用苏格拉底式提问揭示隐藏假设                                          |
 | **Seed**      | 把回答凝结成一份不可变规约                                            |
-| **Execute**   | Double Diamond：Discover → Define → Design → Deliver                  |
+| **Execute**   | 按依赖顺序把验收标准分发给智能体执行                                  |
 | **Evaluate**  | 三阶段关卡：Mechanical（$0）→ Semantic → Multi-Model Consensus        |
 | **Evolve**    | Wonder *("我们还有什么没搞清楚？")* → Reflect → 进入下一代            |
 
@@ -389,9 +392,10 @@ Ralph Cycle 3: evolve_step(lineage)       -> Gen 3 -> action=CONVERGED
 | :------------------- | :---------------------------------------------------------------- | :------------------------------------------------------------ |
 | `ooo setup`          | `ouroboros setup`                                                 | 注册运行时并配置项目（一次性）                                |
 | `ooo interview`      | `ouroboros init start`                                            | 苏格拉底式提问 —— 把隐藏假设挖出来                            |
+| `ooo idk`            | *(经由 skill)*                                                    | 按用户对当前主题的理解调整访谈表述难度                        |
 | `ooo auto`           | `ouroboros auto`                                                  | 从一个目标 → A 级 Seed → 在有界循环里完成执行交接             |
 | `ooo seed`           | *(由 interview 生成)*                                             | 凝结为不可变规约                                              |
-| `ooo run`            | `ouroboros run seed.yaml`                                         | 用 Double Diamond 分解执行                                    |
+| `ooo run`            | `ouroboros run seed.yaml`                                         | 执行 Seed 的验收标准                                          |
 | `ooo evaluate`       | *(经由 MCP)*                                                      | 三阶段验证关卡                                                |
 | `ooo evolve`         | *(经由 MCP)*                                                      | 演化循环，直到本体收敛                                        |
 | `ooo unstuck`        | *(经由 MCP)*                                                      | 卡住时，5 个横向思维人格替你换个角度                          |
@@ -406,9 +410,8 @@ Ralph Cycle 3: evolve_step(lineage)       -> Gen 3 -> action=CONVERGED
 | `ooo update`         | `ouroboros update`                                                | 检查更新 + 升级到最新版                                       |
 | `ooo brownfield`     | *(经由 skill)*                                                    | 扫描并管理 brownfield 仓库 / worktree 默认值                  |
 | `ooo publish`        | *(skill / 运行时；底层用 `gh` CLI)*                               | 把 Seed 发布成 GitHub Epic / Task issue，用于团队协作         |
-| `ooo maintain`       | *(经由 skill；底层用 `gh` CLI)*                                   | 审查和处理 Ouroboros issue 与 PR                              |
 
-> 不是所有技能都有直接对应的 CLI 子命令。其中一些（`evaluate`、`evolve`、`unstuck`、`ralph`、`publish`、`maintain`）通过 agent 技能、运行时规则或 MCP 工具暴露，而不是 `ouroboros <subcommand>` 这种 shell 命令。
+> 不是所有技能都有直接对应的 CLI 子命令。其中一些（`evaluate`、`evolve`、`unstuck`、`ralph`、`publish`）通过 agent 技能、运行时规则或 MCP 工具暴露，而不是 `ouroboros <subcommand>` 这种 shell 命令。
 > `/resume` 是 Claude Code 内置的会话选择器保留指令；要恢复 Ouroboros 进行中的会话，请使用 `ooo resume-session`。
 > Claude Code 还会保留 `/run`、`/status`、`/help` 和 `/config`。安全的直接调用形式是
 > `/ouroboros:ouroboros-run`、`/ouroboros:ouroboros-status`、
@@ -445,7 +448,7 @@ Ralph Cycle 3: evolve_step(lineage)       -> Gen 3 -> action=CONVERGED
 ```
 src/ouroboros/
 +-- bigbang/        Interview、模糊度打分、brownfield 探查
-+-- routing/        PAL Router —— 三档成本优化（1x / 10x / 30x）
++-- router/         技能分发（`ooo <skill>` → MCP 工具）；PAL 档位路由在 orchestrator/
 +-- execution/      （已弃用 —— 逻辑已移至 orchestrator/ 和 mcp/tools/）
 +-- evaluation/     Mechanical -> Semantic -> Multi-Model Consensus
 +-- evolution/      Wonder / Reflect 循环、收敛判定
@@ -462,7 +465,7 @@ src/ouroboros/
 ```
 
 **关键内部细节：**
-- **PAL Router** —— Frugal（1x）→ Standard（10x）→ Frontier（30x），失败自动升级，成功自动降级
+- **PAL Router** —— Frugal（1x）→ Standard（10x）→ Frontier（30x），重试时升级（不会自动降级）
 - **Drift** —— Goal（50%）+ Constraint（30%）+ Ontology（20%）加权度量，阈值 ≤ 0.3
 - **Brownfield** —— 自动识别多种语言生态的配置文件
 - **Evolution** —— 最多 30 代，本体相似度 ≥ 0.95 时收敛

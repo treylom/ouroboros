@@ -55,6 +55,7 @@ from ouroboros.core.seed import (
     AcceptanceCriterionSpec,
     InvestmentSpec,
     ac_text,
+    ac_texts,
     derive_semantic_ac_key,
 )
 from ouroboros.core.session_signal import SessionSignalMode
@@ -81,6 +82,7 @@ from ouroboros.harness.deliver_gate import (
 )
 from ouroboros.harness.journal import EvidenceEntry, EvidenceManifest
 from ouroboros.harness.traceguard_validator import validate_evidence_claims
+from ouroboros.harness.wrapper_receipt import matching_wrapper_receipts
 from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator import (
     adaptive_concurrency,
@@ -90,6 +92,7 @@ from ouroboros.orchestrator import (
 )
 from ouroboros.orchestrator.ac_execution_capsule import (
     UnmaterializableSuccessContractError,
+    bind_capsule_to_resume_authority,
     bind_capsule_to_runtime_handle,
     build_ac_dispatch_authority_scope,
     build_ac_dispatch_request_digest,
@@ -105,7 +108,9 @@ from ouroboros.orchestrator.adapter import (
 from ouroboros.orchestrator.atomic_prompt_builder import (
     AtomicPromptBuilder,
     _build_success_contract_block,  # noqa: F401  (re-exported for tests/back-compat)
+    dispatch_renders_sourced_objective,
 )
+from ouroboros.orchestrator.attempt_evidence import attempt_workspace_evidence, judgment_envelope_ok
 from ouroboros.orchestrator.backend_limits import (
     BackendConcurrencyLimits,
     resolve_backend_limits,
@@ -182,6 +187,12 @@ from ouroboros.orchestrator.evidence.ac_classification import (  # noqa: F401
     _profile_with_evidence_schema,
     _scoped_evidence_record_for_ac,
 )
+from ouroboros.orchestrator.evidence.acceptance_gate import (
+    fat_harness_acceptance_error,
+    split_leaf_rejection,
+    transcript_verifier_mode,
+    verifier_mode_fields,
+)
 from ouroboros.orchestrator.evidence.claims import (  # noqa: F401
     _bash_command_mutates_file_reference,
     _file_claim_matches_runtime_path,
@@ -206,6 +217,7 @@ from ouroboros.orchestrator.evidence.claims import (  # noqa: F401
 )
 from ouroboros.orchestrator.evidence.common import (  # noqa: F401
     _MAX_LEAF_RESULT_CHARS,
+    _SUCCESSFUL_ATTEMPT_OUTCOMES,
     _flatten_evidence_values,
     _normalize_command,
     _normalize_exact_command,
@@ -296,6 +308,7 @@ from ouroboros.orchestrator.evidence.typed_evidence import (  # noqa: F401
 )
 from ouroboros.orchestrator.evidence.verification import (
     _verify_atomic_evidence_against_runtime_messages,
+    observe_wrapper_receipts,
 )
 from ouroboros.orchestrator.evidence_schema import (
     EvidenceError,
@@ -350,6 +363,7 @@ from ouroboros.orchestrator.model_routing import (
     serialize_model_router,
     tier_from_profile_hint,
 )
+from ouroboros.orchestrator.no_evidence_route import NoEvidenceRoute
 from ouroboros.orchestrator.parallel_executor_models import (
     ACExecutionOutcome,
     ACExecutionResult,
@@ -358,13 +372,17 @@ from ouroboros.orchestrator.parallel_executor_models import (
     ParallelExecutionStageResult,
     StageExecutionOutcome,
     check_package_record,
+    checkpoint_contract_fingerprint,
     checkpoint_outcome,
-    collect_decomposition_depth_warning_paths,
     governing_verifier_verdict,
     inherit_check_package_hooks,
     package_settlement_view,
     restore_check_package_record,
     settle_package_results,
+)
+from ouroboros.orchestrator.parallel_reports import (  # noqa: F401  (re-exported)
+    render_parallel_completion_message,
+    render_parallel_verification_report,
 )
 from ouroboros.orchestrator.profile_loader import ExecutionProfile, SuggestedModelTier
 from ouroboros.orchestrator.rate_limit import (
@@ -400,6 +418,7 @@ from ouroboros.orchestrator.route_escalation import (
     VerifierOutcome as RouteVerifierOutcome,
 )
 from ouroboros.orchestrator.route_policy import MAX_ROUTE_ID_CHARS, RouteCandidate
+from ouroboros.orchestrator.runtime_message_projection import should_emit_runtime_progress
 from ouroboros.orchestrator.runtime_param_negotiation import (
     announce_execution_param_degradations,
 )
@@ -411,6 +430,11 @@ from ouroboros.orchestrator.session_signal_followup import (
     claim_follow_up_delivery,
 )
 from ouroboros.orchestrator.shadow_replay import isolated_workspace, run_shadow_replay
+from ouroboros.orchestrator.shared_attempt import (
+    SHARED_ATTEMPT_ROOT,
+    settle_from_shared_attempt,
+    shares_one_attempt,
+)
 from ouroboros.orchestrator.synapse import (
     SessionSignalTarget,
     render_after_turn_signal_prompt,
@@ -425,7 +449,9 @@ from ouroboros.orchestrator.verifier import (
     VerifierVerdict,
     verifier_operational_failure_verdict,
 )
+from ouroboros.orchestrator.verify_base_signal import VerifyBaseSignal
 from ouroboros.orchestrator.verify_command_runner import run_with_shell
+from ouroboros.orchestrator.verify_cwd import bind_verify_command_cwd
 from ouroboros.orchestrator.verify_gate_outcome import (
     _VERIFY_OUTPUT_TAIL_CHARS,
     _deserialize_verify_gate_outcome,
@@ -438,7 +464,6 @@ from ouroboros.orchestrator.verify_gate_outcome import (
 )
 from ouroboros.orchestrator.verify_quarantine import (
     quarantine_unverifiable_result,
-    render_unverifiable_summary,
 )
 from ouroboros.orchestrator.verify_shell import (
     capture_verify_shell_identity,
@@ -448,8 +473,8 @@ from ouroboros.orchestrator.verify_shell import (
     verify_shell_unavailable_reason,
 )
 from ouroboros.orchestrator.workspace_evidence_paths import (
-    is_git_ignored_path,
-    is_untracked_top_level_evidence_path,
+    collect_bounded_workspace_paths,
+    is_declared_contract_path,
     load_ignored_workspace_paths,
     load_tracked_workspace_paths,
 )
@@ -1434,6 +1459,8 @@ def _standard_deliver_facts(
     *,
     task_cwd: str | None,
     verifier_passed: bool,
+    wrapper_receipts: Mapping[str, EvidenceEntry] | None = None,
+    receipt_mode: bool = False,
 ) -> list[DeliverEvidenceFact] | None:
     """Bind default-profile evidence to exact accepted-leaf tool journal rows.
 
@@ -1470,19 +1497,28 @@ def _standard_deliver_facts(
                 match_value = normalized
                 eligible = bool(normalized) and "\n" not in normalized and "\r" not in normalized
             if field == "tests_passed":
-                eligible = eligible and verifier_passed and normalized in commands
+                eligible = (
+                    eligible
+                    and verifier_passed
+                    and (
+                        normalized in (wrapper_receipts or {})
+                        if receipt_mode
+                        else normalized in commands
+                    )
+                )
 
             dedupe_key = (field, match_value)
             if dedupe_key in seen:
                 continue
             seen.add(dedupe_key)
-            matches = (
-                _matching_journal_entries(
+            if eligible and field == "tests_passed" and wrapper_receipts is not None:
+                matches = (wrapper_receipts[normalized],)
+            elif eligible:
+                matches = _matching_journal_entries(
                     manifest, field=field, value=match_value, task_cwd=task_cwd
                 )
-                if eligible
-                else ()
-            )
+            else:
+                matches = ()
             if len(matches) == 1:
                 handle = matches[0].handle
             elif len(matches) > 1:
@@ -1793,6 +1829,8 @@ _WORKSPACE_FINGERPRINT_IGNORED_DIRECTORIES = frozenset(
     }
 )
 _WORKSPACE_FINGERPRINT_IGNORED_REGULAR_FILE_SUFFIXES = frozenset({".pyc", ".pyo"})
+_WORKSPACE_FINGERPRINT_MAX_ENTRIES = 50_000
+_WORKSPACE_FINGERPRINT_MAX_DEPTH = 64
 _ROUTE_SUCCESS_CONTEXT_CHARS = 200
 _ROUTE_SUCCESS_PUBLIC_API_CHARS = 500
 _DURABLE_CONFLICT_PATH_CHARS = 32_768
@@ -2518,127 +2556,6 @@ def _deserialize_composite_completion_result(
     )
 
 
-def render_parallel_verification_report(
-    parallel_result: ParallelExecutionResult,
-    total_acceptance_criteria: int,
-    *,
-    max_decomposition_depth: int = DEFAULT_MAX_DECOMPOSITION_DEPTH,
-) -> str:
-    """Build the canonical QA artifact for parallel execution results."""
-    total_satisfied = parallel_result.success_count + parallel_result.externally_satisfied_count
-    lines = [
-        "Parallel Execution Verification Report",
-        f"Success: {total_satisfied}/{total_acceptance_criteria}",
-    ]
-    if parallel_result.externally_satisfied_count > 0:
-        lines.append(f"Externally Satisfied: {parallel_result.externally_satisfied_count}")
-    if parallel_result.failure_count > 0:
-        lines.append(f"Failed: {parallel_result.failure_count}")
-    if parallel_result.blocked_count > 0:
-        lines.append(f"Blocked: {parallel_result.blocked_count}")
-    if parallel_result.invalid_count > 0:
-        lines.append(f"Invalid: {parallel_result.invalid_count}")
-    unverifiable_indices = [
-        result.ac_index + 1
-        for result in parallel_result.results
-        if (
-            isinstance(result.verify_gate_outcome, _VerifyGateOutcome)
-            and result.verify_gate_outcome.environment_unverifiable
-        )
-        or (
-            result.atomic_verifier_verdict is not None
-            and result.atomic_verifier_verdict.status is VerifierStatus.UNAVAILABLE
-        )
-    ]
-    if unverifiable_indices:
-        lines.append(render_unverifiable_summary(unverifiable_indices))
-
-    warning_paths: list[str] = []
-    for user_facing_idx, result in enumerate(parallel_result.results, start=1):
-        warning_paths.extend(
-            collect_decomposition_depth_warning_paths(
-                result,
-                index_path=(user_facing_idx,),
-            )
-        )
-
-    if warning_paths:
-        feedback_metadata = {
-            "feedback_metadata": [
-                {
-                    "code": "decomposition_depth_warning",
-                    "severity": "warning",
-                    "message": (
-                        "Recursive decomposition reached the soft depth safety net; "
-                        "affected leaves were forced to atomic execution."
-                    ),
-                    "source": "parallel_executor",
-                    "details": {
-                        "max_depth": max_decomposition_depth,
-                        "affected_count": len(warning_paths),
-                        "affected_ac_paths": warning_paths,
-                    },
-                }
-            ]
-        }
-        lines.append("")
-        lines.append("## Feedback Metadata")
-        lines.append(f"Feedback Metadata JSON: {json.dumps(feedback_metadata, sort_keys=True)}")
-
-    lines.append("")
-    lines.append("## Task Results")
-    for result in parallel_result.results:
-        lines.append("")
-        lines.extend(
-            _render_ac_section(
-                result,
-                index_path=(result.ac_index + 1,),
-                heading_level=3,
-            )
-        )
-    return "\n".join(lines)
-
-
-def render_parallel_completion_message(
-    parallel_result: ParallelExecutionResult,
-    total_acceptance_criteria: int,
-) -> str:
-    """Build a concise operator-facing completion summary."""
-    total_satisfied = parallel_result.success_count + parallel_result.externally_satisfied_count
-    lines = [
-        "Parallel Execution Complete",
-        f"Success: {total_satisfied}/{total_acceptance_criteria}",
-    ]
-    if parallel_result.externally_satisfied_count > 0:
-        lines.append(f"Externally Satisfied: {parallel_result.externally_satisfied_count}")
-    if parallel_result.failure_count > 0:
-        lines.append(f"Failed: {parallel_result.failure_count}")
-    if parallel_result.blocked_count > 0:
-        lines.append(f"Blocked: {parallel_result.blocked_count}")
-    if parallel_result.invalid_count > 0:
-        lines.append(f"Invalid: {parallel_result.invalid_count}")
-
-    lines.append("")
-    lines.append("Task Status:")
-    for result in parallel_result.results:
-        if result.outcome == ACExecutionOutcome.SATISFIED_EXTERNALLY:
-            status = "COMPLETED"
-            suffix = " (externally satisfied)"
-        elif result.outcome == ACExecutionOutcome.BLOCKED:
-            status = "BLOCKED"
-            suffix = f" — {result.error}" if result.error else ""
-        elif result.outcome == ACExecutionOutcome.INVALID:
-            status = "INVALID"
-            suffix = f" — {result.error}" if result.error else ""
-        else:
-            status = "COMPLETED" if result.success else "FAILED"
-            suffix = f" ({len(result.sub_results)} subtasks)" if result.is_decomposed else ""
-            if not result.success and result.error:
-                suffix += f" — {result.error}"
-        lines.append(f"- Task {result.ac_index + 1}: [{status}] {result.ac_content}{suffix}")
-    return "\n".join(lines)
-
-
 # =============================================================================
 # Parallel Executor
 # =============================================================================
@@ -2669,6 +2586,7 @@ class ParallelACExecutor:
         model_router: ModelRouter | None = None,
         route_economics: Any | None = None,
         run_verify_commands: bool = True,
+        transcript_verifier: Literal["decide", "record"] = "decide",
         exec_sandbox_enabled: bool | None = None,
         verify_command_timeout_seconds: int = 600,
         verify_shell_identity: Mapping[str, object] | None | _AutoVerifyShell = _AUTO_VERIFY_SHELL,
@@ -2706,6 +2624,7 @@ class ParallelACExecutor:
                 profile axis/min_unit instead of the legacy generic prompt.
             fat_harness_mode: Enforce profile typed evidence plus a verifier
                 PASS at atomic AC acceptance.
+            transcript_verifier: ``decide`` or ``record`` (``evidence/acceptance_gate.py``).
             atomic_verifier: Optional verifier callable for the separate
                 atomic evidence PASS gate. Defaults to the harness-owned
                 structural verifier.
@@ -2781,15 +2700,19 @@ class ParallelACExecutor:
         self._task_cwd = resolve_worker_cwd(task_cwd) if task_cwd else None
         self._execution_profile = execution_profile
         self._fat_harness_mode = fat_harness_mode
+        self._transcript_verifier = transcript_verifier_mode(transcript_verifier)
         self._run_verify_commands = run_verify_commands
         # The runner's sealed execution-sandbox policy for replay; None reads
         # the live switch (``runtime.exec_sandbox.sandbox_enabled``).
         self._exec_sandbox_enabled = exec_sandbox_enabled
         self._verify_command_timeout_seconds = max(1, verify_command_timeout_seconds)
+        # Base snapshot check for failing verify commands; the runner installs it.
+        self._verify_base_signal = VerifyBaseSignal()
         # AC worker tasks currently executing against the shared workspace.
         # The verify gate reads this to tell "my verify_command wrote" apart
         # from "a sibling worker wrote while my command ran".
         self._inflight_ac_workers = 0
+        self._no_evidence = NoEvidenceRoute()  # code-task attempts that left no evidence
         if isinstance(verify_shell_identity, _AutoVerifyShell):
             verify_shell = resolve_verify_shell()
             self._verify_shell_identity = (
@@ -3069,6 +2992,7 @@ class ParallelACExecutor:
                 else None
             ),
             "fat_harness_mode": get_attribute(self, "_fat_harness_mode"),
+            "transcript_verifier": get_attribute(self, "_transcript_verifier"),
             "run_verify_commands": get_attribute(self, "_run_verify_commands"),
             "verify_command_timeout_seconds": get_attribute(
                 self,
@@ -3868,6 +3792,7 @@ class ParallelACExecutor:
         )
 
         start_time = datetime.now(UTC)
+        await self._no_evidence.start(self._task_cwd or self._adapter.working_directory or ".")
         all_results: list[ACExecutionResult] = []
         failed_indices: set[int] = set()
         blocked_indices: set[int] = set()
@@ -3884,6 +3809,12 @@ class ParallelACExecutor:
         total_levels = execution_plan.total_stages
         total_acs = len(seed.acceptance_criteria)
         external_completed = externally_satisfied_acs or {}
+        # Criteria judged from root 0's one worker attempt (``shared_attempt``).
+        shared_criteria = (
+            set(range(SHARED_ATTEMPT_ROOT + 1, total_acs))
+            if shares_one_attempt(seed.sourced_scope, ac_texts(seed.acceptance_criteria))
+            else set()
+        )
         execution_counters = {
             "messages_count": 0,
             "tool_calls_count": 0,
@@ -3910,6 +3841,9 @@ class ParallelACExecutor:
             session_id=session_id,
         )
 
+        contract_fingerprint = checkpoint_contract_fingerprint(
+            seed, self._execution_authority_policy()
+        )
         if self._checkpoint_store:
             try:
                 seed_id = getattr(seed, "id", session_id)
@@ -3928,6 +3862,7 @@ class ParallelACExecutor:
                         and checkpoint_state.get("session_id") == session_id
                         and checkpoint_state.get("execution_id") == execution_id
                         and checkpoint_state.get("workspace_identity") == current_workspace_identity
+                        and checkpoint_state.get("contract_fingerprint") == contract_fingerprint
                     )
                     if checkpoint_matches_invocation:
                         coordinator_mutated_workspace = bool(
@@ -4021,6 +3956,7 @@ class ParallelACExecutor:
                                     in {
                                         "succeeded",
                                         "satisfied_externally",
+                                        "settled_from_shared_attempt",
                                         "failed",
                                         "blocked",
                                         "invalid",
@@ -4033,7 +3969,7 @@ class ParallelACExecutor:
                                         else "failed"
                                     )
                                 )
-                                is_completed = outcome in {"succeeded", "satisfied_externally"}
+                                is_completed = outcome in _SUCCESSFUL_ATTEMPT_OUTCOMES
                                 is_skipped = status == "skipped"
                                 raw_result_retry_attempt = (
                                     raw_result_retry_attempts.get(str(ac_idx))
@@ -4209,6 +4145,7 @@ class ParallelACExecutor:
                 executable: list[int] = []
                 blocked: list[int] = []
                 externally_satisfied: list[int] = []
+                shared: list[int] = []
                 stage_ac_results: list[ACExecutionResult] = []
 
                 for ac_idx in level:
@@ -4225,8 +4162,13 @@ class ParallelACExecutor:
                         blocked.append(ac_idx)
                     elif ac_idx in external_completed:
                         externally_satisfied.append(ac_idx)
+                    elif ac_idx in shared_criteria:
+                        shared.append(ac_idx)
                     else:
                         executable.append(ac_idx)
+                if SHARED_ATTEMPT_ROOT not in executable:
+                    executable.extend(shared)  # no attempt in this stage to judge them from
+                    shared.clear()
 
                 level_success = 0
                 level_failed = 0
@@ -4526,6 +4468,38 @@ class ParallelACExecutor:
                     # below are the replay authority for the interrupted round.
                     break
 
+                source = next(
+                    (r for r in stage_ac_results if r.ac_index == SHARED_ATTEMPT_ROOT), None
+                )
+                for ac_idx in shared:
+                    ac_result = await settle_from_shared_attempt(
+                        self,
+                        seed=seed,
+                        ac_index=ac_idx,
+                        source=source,
+                        session_id=session_id,
+                        execution_id=execution_id,
+                    )
+                    await self._emit_ac_attempt_judged(
+                        result=ac_result,
+                        root_ac_index=ac_idx,
+                        session_id=session_id,
+                        execution_id=execution_id,
+                    )
+                    if ac_result.success:
+                        level_success += 1
+                        ac_statuses[ac_idx] = "completed"
+                        completed_count += 1
+                    elif ac_result.is_blocked:
+                        blocked_indices.add(ac_idx)
+                        ac_statuses[ac_idx] = "skipped"
+                    else:
+                        failed_indices.add(ac_idx)
+                        level_failed += 1
+                        ac_statuses[ac_idx] = "failed"
+                    all_results.append(ac_result)
+                    stage_ac_results.append(ac_result)
+
                 flip_gated_out = await self._compute_sibling_flip_gated_out(
                     seed=seed,
                     level_results=stage_ac_results,
@@ -4767,6 +4741,7 @@ class ParallelACExecutor:
                             state={
                                 "session_id": session_id,
                                 "execution_id": execution_id,
+                                "contract_fingerprint": contract_fingerprint,
                                 "workspace_identity": canonical_workspace_authority(
                                     self._task_cwd
                                     or getattr(self._adapter, "working_directory", None)
@@ -4885,6 +4860,7 @@ class ParallelACExecutor:
                     in {
                         ACExecutionOutcome.SUCCEEDED,
                         ACExecutionOutcome.SATISFIED_EXTERNALLY,
+                        ACExecutionOutcome.SETTLED_FROM_SHARED_ATTEMPT,
                     }
                     else result
                     for result in all_results
@@ -4914,6 +4890,7 @@ class ParallelACExecutor:
                         state={
                             "session_id": session_id,
                             "execution_id": execution_id,
+                            "contract_fingerprint": contract_fingerprint,
                             "workspace_identity": canonical_workspace_authority(
                                 self._task_cwd
                                 or getattr(self._adapter, "working_directory", None)
@@ -4987,7 +4964,12 @@ class ParallelACExecutor:
         # Aggregate results - sort by AC index for consistent ordering
         sorted_results = sorted(all_results, key=lambda r: r.ac_index)
         total_duration = (datetime.now(UTC) - start_time).total_seconds()
-        success_count = sum(1 for r in sorted_results if r.outcome == ACExecutionOutcome.SUCCEEDED)
+        success_count = sum(
+            1
+            for r in sorted_results
+            if r.outcome
+            in {ACExecutionOutcome.SUCCEEDED, ACExecutionOutcome.SETTLED_FROM_SHARED_ATTEMPT}
+        )
         externally_satisfied_count = sum(
             1 for r in sorted_results if r.outcome == ACExecutionOutcome.SATISFIED_EXTERNALLY
         )
@@ -5028,14 +5010,6 @@ class ParallelACExecutor:
 
     @staticmethod
     def _coordinator_review_may_mutate_workspace(review: Any) -> bool:
-        """Return whether a coordinator review could have changed the workspace.
-
-        Coordinator sessions are allowed to use ``Edit`` and ``Bash``.  The
-        structured review summary is not treated as proof of a mutation: a
-        model can report a proposed fix without applying one.  The caller also
-        compares workspace digests around the review, so direct writes remain
-        observable even when a runtime omits tool messages.
-        """
         if review is None:
             return False
         for message in getattr(review, "messages", ()) or ():
@@ -5076,35 +5050,24 @@ class ParallelACExecutor:
                     if declared.is_relative_to(root):
                         declared_paths.add(declared.relative_to(root))
 
-            def is_declared_contract_path(relative: Path) -> bool:
-                return any(
-                    relative == declared
-                    or relative in declared.parents
-                    or declared in relative.parents
-                    for declared in declared_paths
-                )
-
             tracked_paths = load_tracked_workspace_paths(root)
             ignored_paths = load_ignored_workspace_paths(root)
 
             digest = hashlib.sha256()
-            paths = sorted(root.rglob("*"), key=lambda path: path.as_posix())
+            paths = collect_bounded_workspace_paths(
+                root,
+                declared_paths=declared_paths,
+                tracked_paths=tracked_paths,
+                ignored_paths=ignored_paths,
+                ignored_directory_names=_WORKSPACE_FINGERPRINT_IGNORED_DIRECTORIES,
+                max_entries=_WORKSPACE_FINGERPRINT_MAX_ENTRIES,
+                max_depth=_WORKSPACE_FINGERPRINT_MAX_DEPTH,
+            )
+            if paths is None:
+                return None
             for path in paths:
                 relative = path.relative_to(root)
-                declared_contract_path = is_declared_contract_path(relative)
-                if (
-                    is_untracked_top_level_evidence_path(
-                        relative,
-                        tracked_paths=tracked_paths,
-                        is_directory=path.is_dir() and not path.is_symlink(),
-                    )
-                    or is_git_ignored_path(relative, ignored_paths=ignored_paths)
-                    or any(
-                        part in _WORKSPACE_FINGERPRINT_IGNORED_DIRECTORIES
-                        for part in relative.parts
-                    )
-                ) and not declared_contract_path:
-                    continue
+                declared_contract_path = is_declared_contract_path(relative, declared_paths)
                 try:
                     stat = path.lstat()
                     if path.is_symlink():
@@ -5129,9 +5092,10 @@ class ParallelACExecutor:
                             continue
                         digest.update(b"F\0")
                         digest.update(relative.as_posix().encode("utf-8", "surrogateescape"))
-                        digest.update(b"\0")
-                        digest.update(str(stat.st_mode).encode("ascii"))
-                        digest.update(b"\0")
+                        digest.update(f"\0{stat.st_mode}\0".encode("ascii"))
+                        digest.update(
+                            f"{stat.st_ino}:{stat.st_mtime_ns}:{stat.st_ctime_ns}\0".encode("ascii")
+                        )
                         with path.open("rb") as handle:
                             while chunk := handle.read(1024 * 1024):
                                 digest.update(chunk)
@@ -5172,6 +5136,7 @@ class ParallelACExecutor:
             if not result.success or result.outcome not in {
                 ACExecutionOutcome.SUCCEEDED,
                 ACExecutionOutcome.SATISFIED_EXTERNALLY,
+                ACExecutionOutcome.SETTLED_FROM_SHARED_ATTEMPT,
             }:
                 revalidated.append(result)
                 continue
@@ -5480,6 +5445,7 @@ class ParallelACExecutor:
                         reasons=(reason,),
                         failure_class=FailureClass.EVIDENCE_MISSING.value,
                     ),
+                    recorded_rejection=None,  # this verdict decides
                 )
             )
         return settle_package_results(originals, finalized)
@@ -7134,6 +7100,7 @@ class ParallelACExecutor:
             task_cwd=self._task_cwd,
             execution_profile=self._execution_profile,
             fat_harness_mode=self._fat_harness_mode,
+            transcript_verifier=self._transcript_verifier,
             atomic_verifier=self._authority_verifier,
             reasoning_effort=self._reasoning_effort,
             # Preserve the parent's sealed verification contract across the
@@ -7715,16 +7682,7 @@ Respond with either ATOMIC or the structured JSON object only.
         messages_processed: int,
     ) -> bool:
         """Reuse the shared progress-emission policy for AC session messages."""
-        runtime_backend = message.resume_handle.backend if message.resume_handle else None
-        return (
-            message.is_final
-            or messages_processed % 10 == 0
-            or projected.is_tool_call
-            or projected.thinking is not None
-            or message.type == "system"
-            or runtime_backend == "opencode"
-            or projected.is_tool_result
-        )
+        return should_emit_runtime_progress(message, messages_processed, projected=projected)
 
     def _build_session_progress_event(
         self,
@@ -8057,11 +8015,13 @@ Respond with either ATOMIC or the structured JSON object only.
                 depth=depth,
                 outcome=ACExecutionOutcome.INVALID,
             )
-        if (
-            expected_resume_capsule_fingerprint is not None
-            and capsule.fingerprint != expected_resume_capsule_fingerprint
-        ):
-            raise RuntimeError("paused AC capsule fingerprint drifted")
+        if expected_resume_capsule_fingerprint is not None:
+            try:
+                capsule = bind_capsule_to_resume_authority(
+                    capsule, expected_resume_capsule_fingerprint
+                )
+            except ValueError as exc:
+                raise RuntimeError("paused AC capsule fingerprint drifted") from exc
 
         # Build prompt (label/indent, governed task section, success contract,
         # retry/parallel-awareness sections, cwd scan, completion contract).
@@ -9099,10 +9059,8 @@ Respond with either ATOMIC or the structured JSON object only.
 
             duration = (datetime.now(UTC) - start_time).total_seconds()
 
-            # A quota result is a resumable, nonterminal provider boundary.
-            # Preserve its exact scoped handle and leave the capsule dispatch
-            # unsealed; marking the child failed here would make safe resume
-            # impossible and tempt the composite owner to repeat its effects.
+            # Quota pauses retain their scoped handle and unsealed dispatch
+            # so resume cannot repeat completed effects.
             if any(is_usage_limit_pause_message(message) for message in reversed(messages)):
                 return ACExecutionResult(
                     ac_index=ac_index,
@@ -9118,9 +9076,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     route_candidate=observed_route_candidate,
                 )
 
-            # Success contracts add deterministic evidence; they never remove
-            # transcript obligations. This makes verification monotonic: adding
-            # a command cannot weaken the evidence required from the worker.
+            # Success contracts add evidence without weakening transcript obligations.
             has_success_contract = (
                 isinstance(ac_spec, AcceptanceCriterionSpec) and ac_spec.has_success_contract
             )
@@ -9128,6 +9084,11 @@ Respond with either ATOMIC or the structured JSON object only.
                 ac_spec.expected_artifacts
             )
             verify_gate_active = self._run_verify_commands
+            # Check sourced-objective evidence against the full schema shown,
+            # without exemptions from hidden ac_content.
+            sourced_objective = dispatch_renders_sourced_objective(
+                self, parent_ac_index if is_sub_ac else ac_index
+            )
             verify_gate_outcome: _VerifyGateOutcome | None = None
             if success and verify_gate_active and has_success_contract:
                 cwd = self._task_cwd or self._adapter.working_directory or os.getcwd()
@@ -9137,7 +9098,6 @@ Respond with either ATOMIC or the structured JSON object only.
                     spec=ac_spec,
                     cwd=cwd,
                 )
-
             typed_evidence, typed_validation, typed_error = self._observe_atomic_typed_evidence(
                 ac_content=ac_content,
                 final_message=final_message,
@@ -9145,6 +9105,18 @@ Respond with either ATOMIC or the structured JSON object only.
                 has_success_contract=has_success_contract,
                 has_expected_artifacts=has_expected_artifacts,
                 verify_gate_active=verify_gate_active,
+                sourced_objective=sourced_objective,
+            )
+            typed_data = typed_evidence.data if typed_evidence is not None else {}
+            (
+                verified_wrapper_commands,
+                receipt_failure,
+                related_wrapper_commands,
+            ) = await observe_wrapper_receipts(
+                self._event_store,
+                runtime_identity,
+                typed_data,
+                self._task_cwd or getattr(self._adapter, "working_directory", None),
             )
             verifier_verdict = _invoke_execution_authority_entry(
                 self,
@@ -9158,7 +9130,16 @@ Respond with either ATOMIC or the structured JSON object only.
                 has_success_contract=has_success_contract,
                 has_expected_artifacts=has_expected_artifacts,
                 verify_gate_active=verify_gate_active,
+                verified_wrapper_commands=verified_wrapper_commands,
+                related_wrapper_commands=related_wrapper_commands,
+                sourced_objective=sourced_objective,
             )
+            if receipt_failure is not None and (
+                verifier_verdict is None
+                or verifier_verdict.passed
+                or receipt_failure.failure_class == "FABRICATION_SUSPECTED"
+            ):
+                verifier_verdict = receipt_failure
             verify_gate_replaces_all_evidence = bool(
                 verify_gate_outcome is not None
                 and self._execution_profile is not None
@@ -9168,6 +9149,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     has_success_contract=has_success_contract,
                     has_expected_artifacts=has_expected_artifacts,
                     verify_gate_active=verify_gate_active,
+                    sourced_objective=sourced_objective,
                 ).required
             )
             if (
@@ -9197,8 +9179,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 and verifier_verdict.status is VerifierStatus.UNAVAILABLE
             )
             if verifier_unavailable:
-                # No evidence to judge (lost transcript, or only unreplayable runs):
-                # keep the work successful and expose it in the final report.
+                # Keep work successful and report the unavailable evidence.
                 fat_harness_error = None
                 log.warning(
                     "parallel_executor.ac.transcript_verification_unavailable",
@@ -9206,9 +9187,15 @@ Respond with either ATOMIC or the structured JSON object only.
                     execution_id=execution_id,
                     ac_index=ac_index,
                 )
-            legacy_rejection = None
-            if fat_harness_error is not None and getattr(self, "check_package_gate", None):
-                legacy_rejection, fat_harness_error = fat_harness_error, None
+            fat_harness_error, recorded_rejection, legacy_rejection = split_leaf_rejection(
+                fat_harness_error,
+                mode=self._transcript_verifier,
+                verify_gate_outcome=verify_gate_outcome,
+                gated=bool(getattr(self, "check_package_gate", None)),
+                session_id=session_id,
+                execution_id=execution_id,
+                ac_index=ac_index,
+            )
             result_final_message = final_message
             if fat_harness_error is not None:
                 success = False
@@ -9260,14 +9247,14 @@ Respond with either ATOMIC or the structured JSON object only.
                 typed_error=typed_error,
                 verifier_verdict=verifier_verdict,
                 enforcement_error=fat_harness_error,
+                would_have_rejected=recorded_rejection,
                 has_success_contract=has_success_contract,
                 has_expected_artifacts=has_expected_artifacts,
                 verify_gate_active=verify_gate_active,
+                sourced_objective=sourced_objective,
             )
-            # Frugality-proof grounding axis (seed AC4). Only when the leaf was
-            # accepted AND emitted a structured evidence claim (the fat-harness
-            # case) do we run the deterministic TraceGuard verdict; the common
-            # non-fat-harness leaf has no structured claim surface and is skipped.
+            # AC4: TraceGuard checks accepted fat-harness leaves with structured
+            # evidence; non-fat-harness leaves have no claim surface.
             await self._observe_deliver_verdict(
                 runtime_identity=runtime_identity,
                 execution_id=execution_context_id,
@@ -9301,6 +9288,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     ac_spec=ac_spec,
                     isolated_cwd=shadow_snapshot_cwd,
                     suggested_tier=suggested_tier,
+                    sourced_objective=sourced_objective,
                 )
             await self._emit_ac_runtime_event(
                 event_type=(
@@ -9330,6 +9318,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     has_success_contract=has_success_contract,
                     has_expected_artifacts=has_expected_artifacts,
                     verify_gate_active=verify_gate_active,
+                    sourced_objective=sourced_objective,
                 )
 
             log.info(
@@ -9360,6 +9349,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 error=fat_harness_error,
                 route_candidate=observed_route_candidate,
                 legacy_rejection=legacy_rejection,
+                recorded_rejection=recorded_rejection,
             )
 
         except _BatchInterruptedForRecoverablePause:
@@ -9625,6 +9615,18 @@ Respond with either ATOMIC or the structured JSON object only.
                 manifest,
                 task_cwd=self._task_cwd or getattr(self._adapter, "working_directory", None),
                 verifier_passed=verifier_verdict.passed,
+                wrapper_receipts=(
+                    matching_wrapper_receipts(
+                        manifest,
+                        claims=typed_data["wrapper_receipts"],
+                        execution_id=execution_id,
+                        task_cwd=self._task_cwd
+                        or getattr(self._adapter, "working_directory", None),
+                    )
+                    if "wrapper_receipts" in typed_data
+                    else None
+                ),
+                receipt_mode="wrapper_receipts" in typed_data,
             )
             facts = standard_facts if standard_facts is not None else explicit_facts
             if not facts:
@@ -9674,6 +9676,7 @@ Respond with either ATOMIC or the structured JSON object only.
         has_success_contract: bool = False,
         has_expected_artifacts: bool = False,
         verify_gate_active: bool = False,
+        sourced_objective: bool = False,
     ) -> tuple[EvidenceRecord | None, ValidationResult | None, str | None]:
         """Parse and validate typed evidence at the atomic AC acceptance boundary.
 
@@ -9693,6 +9696,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 has_success_contract=has_success_contract,
                 has_expected_artifacts=has_expected_artifacts,
                 verify_gate_active=verify_gate_active,
+                sourced_objective=sourced_objective,
             )
             validation = validate_evidence(
                 _profile_with_evidence_schema(self._execution_profile, effective_schema),
@@ -9707,21 +9711,10 @@ Respond with either ATOMIC or the structured JSON object only.
     async def _run_ac_verify_gate(
         self, *, spec: AcceptanceCriterionSpec, cwd: str
     ) -> _VerifyGateOutcome:
-        """Judge an AC's success contract: expected artifacts + verify command.
-
-        The orchestrator — not the worker — checks the contract so a failing
-        check cannot be self-reported away. All ``expected_artifacts`` must
-        exist under ``cwd`` (checked first — it is cheap — and every missing
-        entry is reported in one failure). ``verify_command``, when set, must
-        then exit 0 and, when ``output_assertion`` is set, print that substring
-        in the combined output.
-        """
+        """Judge root-relative artifacts and a command in its bound verification cwd."""
 
         def workspace_digest() -> str | None:
-            return self._workspace_content_digest(
-                cwd,
-                expected_artifacts=spec.expected_artifacts,
-            )
+            return self._workspace_content_digest(cwd, expected_artifacts=spec.expected_artifacts)
 
         if spec.output_assertion and not spec.verify_command:
             return _VerifyGateOutcome(
@@ -9752,9 +9745,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 workspace_digest=workspace_digest(),
             )
         workspace_before = workspace_digest()
-        # Sibling AC workers share this cwd and keep writing while the command
-        # runs. Sample once, up front: a sibling that finishes mid-command is
-        # still a concurrent writer for the digest window that already opened.
+        # Sample before the command so a sibling finishing mid-run still counts.
         siblings_active = self._sibling_workers_active()
         replay_required = False
 
@@ -9775,11 +9766,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 )
             if workspace_before != workspace_after:
                 if siblings_active:
-                    # A concurrent sibling may own this change; the command's
-                    # own footprint is indistinguishable from it here. Judge
-                    # the exit code now and let final settlement replay the
-                    # command on the quiescent workspace, where a mutation is
-                    # attributable and still rejected.
+                    # Settlement attributes mutation after concurrent writers finish.
                     replay_required = True
                     return None
                 return _VerifyGateOutcome(
@@ -9795,11 +9782,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 )
             return None
 
-        # verify_command is POSIX bash by contract. Resolve a real POSIX
-        # interpreter instead of inheriting the platform shell default, which
-        # is cmd.exe on native Windows and cannot parse that syntax. The
-        # command text itself is never rewritten — the pass/fail signal stays
-        # the exit code of exactly what the seed declared.
+        # Preserve the declared POSIX command even on a non-POSIX host.
         verify_env = project_verify_environment(cwd)
         verify_shell_path = verify_shell_path_from_identity(self._verify_shell_identity)
         if verify_shell_path is None:
@@ -9811,12 +9794,25 @@ Respond with either ATOMIC or the structured JSON object only.
                 environment_unverifiable=True,
                 cause="environment_unverifiable",
             )
-        run = await run_with_shell(
-            (verify_shell_path, "-c", command),
-            cwd=cwd,
-            env=verify_env,
-            timeout_seconds=self._verify_command_timeout_seconds,
-        )
+        bound_cwd = bind_verify_command_cwd(cwd, spec)
+        if bound_cwd.error is not None:
+            return _VerifyGateOutcome(
+                passed=False,
+                reason=bound_cwd.error,
+                output_tail="",
+                workspace_digest=workspace_before,
+                cause="invalid_contract",
+            )
+        try:
+            run = await run_with_shell(
+                (verify_shell_path, "-c", command),
+                cwd=bound_cwd.cwd,
+                env=verify_env,
+                timeout_seconds=self._verify_command_timeout_seconds,
+                cwd_capability=bound_cwd.capability,
+            )
+        finally:
+            bound_cwd.close()
 
         if run.start_error is not None:
             return _VerifyGateOutcome(
@@ -9846,6 +9842,15 @@ Respond with either ATOMIC or the structured JSON object only.
         if mutated is not None:
             return mutated
         returncode = run.returncode
+        if returncode != 0 and await self._verify_base_signal.fails_on_base(
+            command,
+            relative_cwd=bound_cwd.relative_cwd,
+            shell_path=verify_shell_path,
+            timeout_seconds=self._verify_command_timeout_seconds,
+        ):
+            return self._verify_base_signal.no_signal(
+                returncode, tail, workspace_digest(), replay_required
+            )
         if returncode != 0:
             return _VerifyGateOutcome(
                 passed=False,
@@ -9889,7 +9894,9 @@ Respond with either ATOMIC or the structured JSON object only.
         result = await self._apply_verify_command(seed=seed, ac_index=ac_index, **kwargs)
         if result.success and (gate := getattr(self, "check_package_gate", None)) is not None:
             result = await gate(seed=seed, ac_index=ac_index, **{**kwargs, "result": result})
-        return result
+        return await self._no_evidence.route(
+            self, seed=seed, ac_index=ac_index, **{**kwargs, "result": result}
+        )
 
     async def _apply_verify_command(
         self,
@@ -10006,6 +10013,7 @@ Respond with either ATOMIC or the structured JSON object only.
             outcome=ACExecutionOutcome.FAILED,
             atomic_verifier_verdict=verdict,
             verify_gate_outcome=outcome,
+            recorded_rejection=None,  # this verdict decides
         )
 
     async def _emit_ac_attempt_judged(
@@ -10094,6 +10102,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     "call_site": "parallel",
                 }
             )
+        event_data.update(await attempt_workspace_evidence(self, result))
         event = BaseEvent(
             type="execution.ac.attempt_judged",
             aggregate_type="execution",
@@ -10807,6 +10816,7 @@ Respond with either ATOMIC or the structured JSON object only.
             retry_batch_final = all(
                 ac_retry_attempts[ac_idx] >= self._ac_retry_attempts for ac_idx in retry_idxs
             )
+            await retry_hints.throttle_wait(results, position_by_idx, retry_idxs, ac_retry_attempts)
             retry_results = await self._execute_ac_batch(
                 seed=seed,
                 batch_indices=retry_idxs,
@@ -12163,7 +12173,7 @@ Respond with either ATOMIC or the structured JSON object only.
             # not participate in this replay episode.
             if data.get("route_contract_version") is None:
                 continue
-            if not _mapping_has_exact_keys(data, _PARALLEL_ROUTE_JUDGMENT_KEYS):
+            if not judgment_envelope_ok(data, _PARALLEL_ROUTE_JUDGMENT_KEYS):
                 raise RuntimeError("route-aware attempt judgment has an invalid event envelope")
             root_ac_index = data.get("root_ac_index")
             route_episode_id = data.get("route_episode_id")
@@ -12731,50 +12741,13 @@ Respond with either ATOMIC or the structured JSON object only.
             stall_retries_exhausted=False,
         )
 
-    def _fat_harness_acceptance_error(
-        self,
-        *,
-        runtime_success: bool,
-        typed_evidence: EvidenceRecord | None,
-        typed_validation: ValidationResult | None,
-        typed_error: str | None,
-        verifier_verdict: VerifierVerdict | None,
-        verify_gate_outcome: _VerifyGateOutcome | None = None,
-        verify_gate_replaces_all_evidence: bool = False,
-    ) -> str | None:
-        """Return the fat-harness rejection reason for an atomic leaf."""
-        if not self._fat_harness_mode or not runtime_success:
-            return None
-        if verify_gate_outcome is not None:
-            if verify_gate_outcome.environment_unverifiable:
-                return None
-            if not verify_gate_outcome.passed:
-                return f"Verify gate failed: {verify_gate_outcome.reason}"
-            if verify_gate_replaces_all_evidence:
-                return None
-        if self._execution_profile is None:
-            return "Fat-harness mode requires a loaded execution profile."
-        if typed_evidence is None:
-            return typed_error or "Fat-harness mode requires typed evidence."
-        if typed_validation is None:
-            return "Fat-harness mode could not validate typed evidence."
-        if typed_validation.ok:
-            if verifier_verdict is None:
-                return "Fat-harness mode requires verifier PASS before atomic acceptance."
-            if verifier_verdict.passed:
-                return None
-            detail = "; ".join(verifier_verdict.reasons) or "verifier rejected atomic evidence"
-            return f"Fat-harness verifier failed ({detail})."
-
-        reasons: list[str] = []
-        if typed_validation.missing_fields:
-            reasons.append("missing fields: " + ", ".join(typed_validation.missing_fields))
-        if typed_validation.rejected_by:
-            reasons.append("rejected by: " + ", ".join(typed_validation.rejected_by))
-        if typed_validation.blocker is not None:
-            reasons.append("blocker: " + typed_validation.blocker.summary())
-        detail = "; ".join(reasons) if reasons else "profile evidence validation failed"
-        return f"Fat-harness typed evidence validation failed ({detail})."
+    def _fat_harness_acceptance_error(self, **kwargs: Any) -> str | None:
+        """Return the fat-harness rejection reason for an atomic leaf (``acceptance_gate``)."""
+        return fat_harness_acceptance_error(
+            fat_harness_mode=self._fat_harness_mode,
+            execution_profile=self._execution_profile,
+            **kwargs,
+        )
 
     def _run_atomic_verifier_pass(
         self,
@@ -12788,8 +12761,11 @@ Respond with either ATOMIC or the structured JSON object only.
         has_success_contract: bool = False,
         has_expected_artifacts: bool = False,
         verify_gate_active: bool = False,
+        sourced_objective: bool = False,
         force_runtime_transcript: bool = False,
         task_cwd_override: str | None = None,
+        verified_wrapper_commands: frozenset[str] = frozenset(),
+        related_wrapper_commands: frozenset[str] = frozenset(),
     ) -> VerifierVerdict | None:
         """Run the separate verifier pass once typed evidence is schema-valid."""
         if (
@@ -12811,6 +12787,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 has_success_contract=has_success_contract,
                 has_expected_artifacts=has_expected_artifacts,
                 verify_gate_active=verify_gate_active,
+                sourced_objective=sourced_objective,
             )
             effective_profile = _profile_with_evidence_schema(
                 self._execution_profile, effective_schema
@@ -12822,6 +12799,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 has_success_contract=has_success_contract,
                 has_expected_artifacts=has_expected_artifacts,
                 verify_gate_active=verify_gate_active,
+                sourced_objective=sourced_objective,
             )
             verdict = (
                 verifier(
@@ -12831,9 +12809,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     record=scoped_evidence,
                 )
                 if verifier is not None and not force_runtime_transcript
-                # Do not route acceptance through the mutable executor wrapper.
-                # Foundation A captured this closed transcript verifier at
-                # construction and has just checked that binding above.
+                # Use the constructor-captured transcript verifier checked above.
                 else self._authority_transcript_verifier(
                     messages=messages,
                     typed_evidence=scoped_evidence,
@@ -12846,6 +12822,9 @@ Respond with either ATOMIC or the structured JSON object only.
                     has_success_contract=has_success_contract,
                     has_expected_artifacts=has_expected_artifacts,
                     verify_gate_active=verify_gate_active,
+                    verified_wrapper_commands=verified_wrapper_commands,
+                    related_wrapper_commands=related_wrapper_commands,
+                    sourced_objective=sourced_objective,
                 )
             )
         except VerifierContractError:
@@ -12866,6 +12845,7 @@ Respond with either ATOMIC or the structured JSON object only.
         has_success_contract: bool = False,
         has_expected_artifacts: bool = False,
         verify_gate_active: bool = False,
+        sourced_objective: bool = False,
         task_cwd_override: str | None = None,
     ) -> VerifierVerdict:
         return self._authority_transcript_verifier(
@@ -12878,6 +12858,7 @@ Respond with either ATOMIC or the structured JSON object only.
             has_success_contract=has_success_contract,
             has_expected_artifacts=has_expected_artifacts,
             verify_gate_active=verify_gate_active,
+            sourced_objective=sourced_objective,
         )
 
     async def _emit_atomic_typed_evidence_event(
@@ -12892,9 +12873,11 @@ Respond with either ATOMIC or the structured JSON object only.
         typed_error: str | None,
         verifier_verdict: VerifierVerdict | None = None,
         enforcement_error: str | None = None,
+        would_have_rejected: str | None = None,
         has_success_contract: bool = False,
         has_expected_artifacts: bool = False,
         verify_gate_active: bool = False,
+        sourced_objective: bool = False,
     ) -> None:
         """Persist typed-evidence metadata for atomic AC completion."""
         if self._execution_profile is None:
@@ -12914,13 +12897,18 @@ Respond with either ATOMIC or the structured JSON object only.
                     has_success_contract=has_success_contract,
                     has_expected_artifacts=has_expected_artifacts,
                     verify_gate_active=verify_gate_active,
+                    sourced_objective=sourced_objective,
                 ).required
             ),
             "observe_only": not self._fat_harness_mode,
-            "enforced": self._fat_harness_mode
-            and not (
-                verifier_verdict is not None
-                and verifier_verdict.status is VerifierStatus.UNAVAILABLE
+            **verifier_mode_fields(
+                self._transcript_verifier,
+                enforced=self._fat_harness_mode
+                and not (
+                    verifier_verdict is not None
+                    and verifier_verdict.status is VerifierStatus.UNAVAILABLE
+                ),
+                would_have_rejected=would_have_rejected,
             ),
             "fat_harness_mode": self._fat_harness_mode,
             "enforcement_error": enforcement_error,
@@ -12950,6 +12938,7 @@ Respond with either ATOMIC or the structured JSON object only.
                     has_success_contract=has_success_contract,
                     has_expected_artifacts=has_expected_artifacts,
                     verify_gate_active=verify_gate_active,
+                    sourced_objective=sourced_objective,
                 )
             )
             data["ignored_out_of_scope_evidence"] = _out_of_scope_evidence_values_for_ac(
@@ -12959,6 +12948,7 @@ Respond with either ATOMIC or the structured JSON object only.
                 has_success_contract=has_success_contract,
                 has_expected_artifacts=has_expected_artifacts,
                 verify_gate_active=verify_gate_active,
+                sourced_objective=sourced_objective,
             )
         if typed_validation is not None:
             data["missing_fields"] = list(typed_validation.missing_fields)
@@ -13067,7 +13057,6 @@ Respond with either ATOMIC or the structured JSON object only.
         while True:
             await anyio.sleep(interval)
 
-            # RC4: Stop when all ACs are done
             if all(s in terminal_states for s in ac_statuses.values()):
                 log.info("parallel_executor.progress_emitter.all_done")
                 return

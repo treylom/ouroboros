@@ -4,8 +4,9 @@ Use Ouroboros commands when the user is asking to clarify requirements, generate
 
 ## CRITICAL: MCP Tool Routing
 
-When the user types `ooo <command>`, you MUST call the corresponding MCP tool.
-Do NOT interpret `ooo` commands as natural language. ALWAYS route to the MCP tool.
+When the user types an MCP-backed `ooo <command>`, you MUST call the
+corresponding MCP tool. Session-native skills are the explicit exception:
+load and follow their installed `SKILL.md` instead of inventing an MCP call.
 
 | User Input | MCP Tool to Call |
 |-----------|-----------------|
@@ -20,12 +21,17 @@ Do NOT interpret `ooo` commands as natural language. ALWAYS route to the MCP too
 | `ooo cancel [execution_id]` | `ouroboros_cancel_execution` |
 | `ooo unstuck` / `ooo lateral` | `ouroboros_lateral_think` |
 
+`ooo idk ...` routes to `ouroboros_interview` as a session-local calibration
+control turn. Preserve the pending question, do not treat the calibration text
+as its answer, and do not persist a user profile.
+
 If `ouroboros_start_auto` is unavailable, stop and report that the MCP dispatch surface is broken. Do not manually emulate `ooo auto` with ordinary shell, GitHub, or coding work.
 
 ## Natural Language Mapping
 
 Do not wait for the literal word `ooo`. When a natural-language request clearly
-matches these cases, route it to the corresponding MCP tool proactively:
+matches these cases, route it to the corresponding MCP tool proactively, as your
+first step, before reading code or implementing it yourself:
 
 - "clarify requirements", "interview me", "socratic interview",
   "the requirements are vague", "let's pin down the scope first",
@@ -40,6 +46,7 @@ matches these cases, route it to the corresponding MCP tool proactively:
 - "evaluate", "verify the result" → call `ouroboros_start_evaluate`
 - "I'm stuck", "we keep going in circles", "still failing after several
   tries", "is there another way?" → call `ouroboros_lateral_think`
+- "write a PRD", "product requirements" → call `ouroboros_pm_interview`
 
 `ouroboros_lateral_think` is also a proactive tool, not only a user-invoked
 one: when you observe stagnation yourself — the same fix attempted twice, a
@@ -81,6 +88,11 @@ structured and inline contracts differ or validation fails, stop on
 transport-integrity failure.
 
 When the response exposes an observer contract, explicitly delegate that object to exactly one native Codex subagent session.
+This observer handoff applies to every background starter that returns an
+observer contract (`ooo run`, `ooo auto`, `ooo ralph`, evaluate, and evolve),
+not only to auto. The shared skills describe the observer generically; the
+Codex spawn and parent-relay mechanics below are the Codex mapping of that
+contract.
 That observer is read-only and exclusively owns `ouroboros_job_wait`, its cursor,
 `ouroboros_job_result`, and any downstream job IDs named by
 `follow_result_job_keys`. Keep the main session available for the user; do not

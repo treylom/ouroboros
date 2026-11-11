@@ -34,6 +34,7 @@ from ouroboros.backends.capabilities import (
 )
 from ouroboros.codex.home import resolve_codex_home
 from ouroboros.config._model_defaults import (
+    CODEX_TIER_MODELS,
     DEFAULT_HAIKU_MODEL,
     DEFAULT_OPUS_MODEL,
     DEFAULT_SONNET_MODEL,
@@ -69,6 +70,7 @@ _DEFAULT_FIRST_MODEL_BACKENDS = frozenset(
         "zcode",
         "gemini",
         "goose",
+        "megacode",
         "host",
     }
 )
@@ -108,11 +110,12 @@ class BackendModelCatalog:
         return self.models[0] if self.models else DEFAULT_MODEL_SENTINEL
 
 
-# Hand-curated additions per backend, appended after the default entry. Keep entries verifiable: the codex ids below were confirmed
-# against a live `opencode models` listing of the OpenAI catalog.
+# Native catalog additions, appended after the CLI-owned default. The Codex
+# candidates come from its official model guide, not another CLI's catalog;
+# account/provider availability is still determined by the target runtime.
 _EXTRA_KNOWN_MODELS: dict[str, tuple[str, ...]] = {
     "claude": (DEFAULT_HAIKU_MODEL,),
-    "codex": ("gpt-5-codex", "gpt-5", "gpt-5-mini"),
+    "codex": tuple(CODEX_TIER_MODELS.values()),
     # Grok Build model slugs, after the CLI-owned "default" sentinel. Verified
     # against a live `grok models` listing (grok-build, grok-composer-2.5-fast).
     "grok": ("grok-build", "grok-composer-2.5-fast"),
@@ -280,6 +283,42 @@ def get_model_catalog(backend: str) -> BackendModelCatalog:
     return _CATALOGS[capability.name]
 
 
+def recommended_cli_models(backend: str, models: tuple[str, ...]) -> tuple[str, ...]:
+    """Curate ordinary choices without changing explicit or saved model ids.
+
+    Only known OpenCode MiniMax text routes are curated. Keep CLI availability
+    authoritative: never add a route that the installed CLI did not list.
+    Media models and custom provider namespaces retain their original ordering.
+    """
+    if backend != "opencode":
+        return models
+    routes = {
+        "minimax/": ("MiniMax-M3.1-Flash", "MiniMax-M3"),
+        "minimax-cn/": ("MiniMax-M3.1-Flash", "MiniMax-M3"),
+        "openrouter/minimax/": ("minimax-m3.1-flash:free", "minimax-m3"),
+        "opencode/": ("minimax-m3.1-flash-free", "minimax-m3"),
+    }
+    available = set(models)
+    emitted: set[str] = set()
+    choices: list[str] = []
+    for model in models:
+        for prefix, current in routes.items():
+            suffix = model.removeprefix(prefix).lower()
+            is_text_model = (
+                (suffix.startswith("minimax-m") and suffix[9:10].isdigit())
+                or suffix == "minimax-text-01"
+                or (suffix.startswith("abab") and suffix.endswith("-chat"))
+            )
+            if model.startswith(prefix) and is_text_model:
+                if prefix not in emitted:
+                    choices.extend(prefix + name for name in current if prefix + name in available)
+                    emitted.add(prefix)
+                break
+        else:
+            choices.append(model)
+    return tuple(choices)
+
+
 def model_choices(backend: str) -> tuple[str, ...]:
     """Known model choices for a backend (UIs append a custom entry)."""
     return get_model_catalog(backend).models
@@ -357,6 +396,7 @@ _CLI_PATH_GETTERS: dict[str, str] = {
     # Without this entry, ``detect_backend_cli("zcode")`` ignored the
     # configured path and Zcode was invisible to ``installed_backends()``.
     "zcode": "get_zcode_cli_path",
+    "megacode": "resolve_megacode_cli_path",
     "dsh": "get_dsh_cli_path",
 }
 
@@ -380,6 +420,10 @@ def detect_backend_cli(backend: str) -> str | None:
         from ouroboros.config import loader as config_loader
 
         configured = getattr(config_loader, getter_name)()
+        if capability.name == "megacode":
+            # The shared resolver already validated this path. Do not fall
+            # back to catalog PATH lookup, which accepts relative entries.
+            return configured
         if configured:
             configured_path = _resolve_executable_candidate(configured)
             if configured_path is not None:
@@ -426,7 +470,7 @@ def configured_default_model(backend: str) -> str | None:
             config_path = Path.home() / ".hermes" / "config.yaml"
             if not config_path.exists():
                 return None
-            data = yaml.safe_load(config_path.read_text()) or {}
+            data = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
             model = data.get("model")
             if isinstance(model, dict):
                 value = model.get("default")
@@ -438,7 +482,7 @@ def configured_default_model(backend: str) -> str | None:
             config_path = resolve_codex_home() / "config.toml"
             if not config_path.exists():
                 return None
-            data = tomllib.loads(config_path.read_text())
+            data = tomllib.loads(config_path.read_text(encoding="utf-8"))
             value = data.get("model")
             return str(value) if value else None
     except Exception:  # noqa: BLE001 - a hint must never break the caller
@@ -455,6 +499,7 @@ __all__ = [
     "get_model_catalog",
     "installed_backends",
     "model_choices",
+    "recommended_cli_models",
     "refresh_models",
     "uses_default_model_sentinel",
 ]

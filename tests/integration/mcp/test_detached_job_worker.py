@@ -3,12 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-import os
+import json
 from pathlib import Path
 import platform
-import subprocess
-import sys
-import textwrap
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -35,45 +32,7 @@ from ouroboros.orchestrator.persisted_process_identity import (
 )
 from ouroboros.persistence import lineage_claims
 from ouroboros.persistence.event_store import EventStore
-
-_LAUNCH_PARENT = textwrap.dedent(
-    """
-    import asyncio
-    import os
-    from pathlib import Path
-    import sys
-
-    from ouroboros.mcp.detached_jobs import DetachedJobRequest, launch_detached_job
-    from ouroboros.mcp.job_manager import JobManager
-    from ouroboros.persistence.event_store import EventStore
-
-    async def main():
-        database_url, cwd, delay, tool_name = sys.argv[1:]
-        store = EventStore(database_url)
-        manager = JobManager(store, durable_jobs=True)
-        job_id = await manager.allocate_job_id()
-        argument_name = (
-            "nested_delay_seconds"
-            if tool_name == "__detached_nested_probe__"
-            else "delay_seconds"
-        )
-        snapshot = await launch_detached_job(
-            job_manager=manager,
-            event_store=store,
-            request=DetachedJobRequest(
-                job_id=job_id,
-                tool_name=tool_name,
-                arguments={argument_name: float(delay)},
-                database_url=database_url,
-                cwd=cwd,
-            ),
-        )
-        print(f"{os.getpid()} {snapshot.job_id}", flush=True)
-        await store.close()
-
-    asyncio.run(main())
-    """
-)
+from tests.integration.mcp.detached_probe_process import accepting_parent
 
 
 async def _wait_terminal(
@@ -144,7 +103,9 @@ def test_detached_tool_error_rejection_rejects_non_json_details() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("spoof", ["job_id", "worker_pid", "request_tool_name"])
+@pytest.mark.parametrize(
+    "spoof", ["job_id", "request_tool_name", "launch_token", "missing_token", "worker_pid"]
+)
 async def test_detached_launcher_fails_closed_and_cleans_spoofed_rejection(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -175,13 +136,18 @@ async def test_detached_launcher_fails_closed_and_cleans_spoofed_rejection(
             "job_id": job_id,
             "request_tool_name": "ouroboros_start_evolve_step",
             "rejection": encode_tool_error_rejection(MCPToolError("seed rejected")),
+            "launch_token": json.loads(request_path.read_text(encoding="utf-8"))["launch_token"],
         }
         if spoof == "job_id":
             payload["job_id"] = "job_swapped"
         elif spoof == "worker_pid":
-            payload["worker_pid"] = 9999
-        else:
+            payload["worker_pid"] = -1
+        elif spoof == "request_tool_name":
             payload["request_tool_name"] = "ouroboros_start_execute_seed"
+        elif spoof == "missing_token":
+            del payload["launch_token"]
+        else:
+            payload["launch_token"] = "0" * 64
         write_private_json(status_path_for(request_path), payload, exclusive=False)
         return FakeProcess()
 
@@ -215,6 +181,7 @@ async def test_production_detached_evolve_rejects_malformed_seed_before_job_acce
 ) -> None:
     """The default file-backed server returns the worker's typed preclaim error."""
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
     monkeypatch.setenv("OUROBOROS_DASHBOARD", "0")
     database_url = f"sqlite+aiosqlite:///{tmp_path / 'events.db'}"
     store = EventStore(database_url)
@@ -444,7 +411,7 @@ async def test_worker_preserves_live_job_after_postaccept_receipt_failure(
         database_url=f"sqlite+aiosqlite:///{tmp_path / 'worker-postaccept.db'}",
         cwd=str(tmp_path),
     )
-    state: dict[str, object] = {"runner_calls": 0, "live_before_failure": False}
+    state: dict[str, int | bool] = {"runner_calls": 0, "live_before_failure": False}
     final: dict[str, object] = {}
 
     class ReceiptFailureManager(JobManager):
@@ -601,92 +568,46 @@ async def test_slow_acceptance_returns_structured_status_receipt(
     }
 
 
-def _spawn_accepting_parent(
-    *,
-    database_url: str,
-    cwd: Path,
-    home: Path,
-    delay: float,
-) -> tuple[int, str]:
-    env = os.environ.copy()
-    env.update(
-        {
-            "HOME": str(home),
-            "OUROBOROS_DASHBOARD": "0",
-        }
-    )
-    completed = subprocess.run(  # noqa: S603 - fixed interpreter/test program
-        [
-            sys.executable,
-            "-c",
-            _LAUNCH_PARENT,
-            database_url,
-            str(cwd),
-            str(delay),
-            "__detached_probe__",
-        ],
-        cwd=cwd,
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=True,
-    )
-    parent_pid, job_id = completed.stdout.strip().split()
-    return int(parent_pid), job_id
-
-
-def _spawn_nested_accepting_parent(
-    *,
-    database_url: str,
-    cwd: Path,
-    home: Path,
-    delay: float,
-) -> tuple[int, str]:
-    env = os.environ.copy()
-    env.update({"HOME": str(home), "OUROBOROS_DASHBOARD": "0"})
-    completed = subprocess.run(  # noqa: S603 - fixed interpreter/test program
-        [
-            sys.executable,
-            "-c",
-            _LAUNCH_PARENT,
-            database_url,
-            str(cwd),
-            str(delay),
-            "__detached_nested_probe__",
-        ],
-        cwd=cwd,
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=True,
-    )
-    parent_pid, job_id = completed.stdout.strip().split()
-    return int(parent_pid), job_id
-
-
 @pytest.mark.asyncio
-async def test_detached_job_survives_accepting_process_exit(tmp_path: Path) -> None:
+@pytest.mark.parametrize("exit_mode", ["normal", "forced"])
+@pytest.mark.parametrize("receipt_read_error", [None, PermissionError, FileNotFoundError])
+async def test_detached_job_survives_accepting_process_exit(
+    tmp_path: Path,
+    exit_mode: str,
+    receipt_read_error: type[OSError] | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The worker, not the exited MCP-like parent, owns terminal delivery."""
     database_url = f"sqlite+aiosqlite:///{tmp_path / 'events.db'}"
-    parent_pid, job_id = _spawn_accepting_parent(
+    receipt = tmp_path / "home" / "parent.json"
+    read_text = Path.read_text
+    read_failures = 0
+
+    def read_with_transient_failure(path: Path, *args, **kwargs):
+        nonlocal read_failures
+        if path == receipt and receipt_read_error is not None and read_failures == 0:
+            read_failures += 1
+            raise receipt_read_error("transient receipt publication contention")
+        return read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_with_transient_failure)
+    async with accepting_parent(
         database_url=database_url,
         cwd=Path.cwd(),
         home=tmp_path / "home",
-        delay=3.0,
-    )
-
-    store = EventStore(database_url)
-    manager = JobManager(store)
-    try:
+        delay=5.0,
+        exit_mode=exit_mode,
+    ) as probe:
+        assert read_failures == (1 if receipt_read_error is not None else 0)
+        store, manager, job_id = probe.store, probe.manager, probe.job_id
         snapshot = await manager.get_snapshot(job_id)
         events = await store.replay("job", job_id)
         created = events[0]
         owner_pid = created.data["owner_pid"]
         owner_start_time = created.data.get("owner_start_time")
 
-        assert owner_pid != parent_pid
+        assert owner_pid != probe.record["parent_pid"]
+        assert owner_pid == probe.record["owner_pid"]
         assert snapshot.status in {JobStatus.QUEUED, JobStatus.RUNNING}
         assert is_process_identity_alive(owner_pid, owner_start_time)
         if platform.system() == "Linux":
@@ -702,24 +623,20 @@ async def test_detached_job_survives_accepting_process_exit(tmp_path: Path) -> N
         assert terminal.result_text == "detached probe complete"
         final_events = await store.replay("job", job_id)
         assert all(event.type != "mcp.job.interrupted" for event in final_events)
-    finally:
-        await store.close()
+        await probe.wait_worker_exit()
 
 
 @pytest.mark.asyncio
 async def test_external_controller_cancels_detached_owner(tmp_path: Path) -> None:
     """A later MCP process delivers CANCEL_REQUESTED to the owning worker."""
     database_url = f"sqlite+aiosqlite:///{tmp_path / 'events.db'}"
-    _parent_pid, job_id = _spawn_accepting_parent(
+    async with accepting_parent(
         database_url=database_url,
         cwd=Path.cwd(),
         home=tmp_path / "home",
         delay=30.0,
-    )
-
-    store = EventStore(database_url)
-    controller = JobManager(store)
-    try:
+    ) as probe:
+        store, controller, job_id = probe.store, probe.manager, probe.job_id
         requested = await controller.cancel_job(job_id)
         assert requested.status in {JobStatus.CANCEL_REQUESTED, JobStatus.CANCELLED}
 
@@ -728,24 +645,21 @@ async def test_external_controller_cancels_detached_owner(tmp_path: Path) -> Non
         events = await store.replay("job", job_id)
         assert any(event.type == "mcp.job.cancelled" for event in events)
         assert all(event.type != "mcp.job.interrupted" for event in events)
-    finally:
-        await store.close()
+        await probe.wait_worker_exit()
 
 
 @pytest.mark.asyncio
 async def test_nested_handoff_gets_independent_durable_owner(tmp_path: Path) -> None:
     """Auto/run-style nested handoffs outlive the top-level worker."""
     database_url = f"sqlite+aiosqlite:///{tmp_path / 'events.db'}"
-    _parent_pid, outer_job_id = _spawn_nested_accepting_parent(
+    async with accepting_parent(
         database_url=database_url,
         cwd=Path.cwd(),
         home=tmp_path / "home",
-        delay=4.0,
-    )
-
-    store = EventStore(database_url)
-    manager = JobManager(store)
-    try:
+        delay=6.0,
+        nested=True,
+    ) as probe:
+        store, manager, outer_job_id = probe.store, probe.manager, probe.job_id
         outer = await _wait_terminal(manager, outer_job_id)
         assert outer.status == JobStatus.COMPLETED
         nested_job_id = outer.result_meta["nested_job_id"]
@@ -756,6 +670,8 @@ async def test_nested_handoff_gets_independent_durable_owner(tmp_path: Path) -> 
         outer_owner = outer_events[0].data["owner_pid"]
         nested_owner = nested_events[0].data["owner_pid"]
         assert nested_owner != outer_owner
+        nested_process = probe.track(nested_owner)
+        await probe.wait_worker_exit()
 
         nested = await manager.get_snapshot(nested_job_id)
         assert nested.status in {JobStatus.QUEUED, JobStatus.RUNNING}
@@ -767,5 +683,4 @@ async def test_nested_handoff_gets_independent_durable_owner(tmp_path: Path) -> 
         terminal = await _wait_terminal(manager, nested_job_id)
         assert terminal.status == JobStatus.COMPLETED
         assert terminal.result_text == "detached probe complete"
-    finally:
-        await store.close()
+        await nested_process.wait()

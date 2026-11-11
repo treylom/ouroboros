@@ -15,7 +15,11 @@ from typing import Any
 from pydantic import BaseModel, Field, model_validator
 import structlog
 
-from ouroboros.bigbang.answer_provenance import AnswerProvenance, classify_answer_provenance
+from ouroboros.bigbang.answer_provenance import (
+    DECLARED_PROVENANCES,
+    AnswerProvenance,
+    classify_answer_provenance,
+)
 from ouroboros.config import get_llm_model_for_role
 from ouroboros.core.errors import ProviderError, ValidationError
 from ouroboros.core.file_lock import file_lock as _file_lock
@@ -38,6 +42,7 @@ from ouroboros.interview_adapters import (
     reference_question_anchor,
     select_glossary_injection,
 )
+from ouroboros.interview_calibration import InterviewCalibration
 from ouroboros.km import KMRecall, extract_query, render_label
 from ouroboros.providers.base import (
     CompletionConfig,
@@ -57,6 +62,7 @@ DEFAULT_INTERVIEW_ROUNDS = 10  # Reference value for prompts (not enforced)
 # Legacy alias for backward compatibility
 MAX_INTERVIEW_ROUNDS = DEFAULT_INTERVIEW_ROUNDS
 MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS = 3500
+MAX_REPHRASE_QUESTION_CHARS = 4000
 INITIAL_CONTEXT_SUMMARY_QUESTION = (
     "Your saved initial context is too long to safely send to the interview "
     "model without risking CLI prompt failure. Please reply with a concise "
@@ -181,8 +187,9 @@ class InterviewRound(BaseModel):
         round_number: 1-based round number (no upper limit - user controls).
         question: The question asked by the system.
         user_response: The user's response (None if not yet answered).
-        provenance: Whether the answer is a decision the caller made or a fact
-            the caller adopted from elsewhere. Consumers read this field rather
+        provenance: Whether the answer is a decision the caller made, a fact
+            the caller adopted from elsewhere, or a guess the caller declared as
+            an assumption (see ``answer_provenance``). Consumers read this field rather
             than re-reading the ``[from-*]`` marker, which is what drifted
             before (#1755).
         timestamp: When this round was created.
@@ -209,8 +216,11 @@ class InterviewRound(BaseModel):
         leave every in-flight interview holding observations that still carry
         requirement authority, so an answer's provenance is settled here too —
         one classifier, still no consumer reading the marker.
+
+        A declared provenance (``"assumption"``, ``"requester"``) is not derived
+        from the answer, so it is kept as recorded rather than re-derived.
         """
-        if self.user_response is not None:
+        if self.user_response is not None and self.provenance not in DECLARED_PROVENANCES:
             answer_for_classification = self.user_response
             # PM interviews before #1823 decorated reframed answers after the
             # provenance marker had already been supplied, producing
@@ -966,6 +976,8 @@ class InterviewEngine:
     def prepare_next_question(
         self,
         state: InterviewState,
+        *,
+        language_calibration: InterviewCalibration | None = None,
     ) -> Result[PreparedInterviewQuestion, ValidationError]:
         """Build the canonical provider request for the next interview question.
 
@@ -1027,6 +1039,7 @@ class InterviewEngine:
             state,
             initial_context=effective_initial_context,
             max_chars=system_prompt_budget,
+            language_calibration=language_calibration,
         )
         messages = (
             Message(role=MessageRole.SYSTEM, content=system_prompt),
@@ -1052,10 +1065,19 @@ class InterviewEngine:
         )
 
     async def ask_next_question(
-        self, state: InterviewState
+        self,
+        state: InterviewState,
+        *,
+        language_calibration: InterviewCalibration | None = None,
     ) -> Result[str, ProviderError | ValidationError]:
         """Generate the next question based on current state."""
-        prepared_result = self.prepare_next_question(state)
+        if language_calibration is None:
+            prepared_result = self.prepare_next_question(state)
+        else:
+            prepared_result = self.prepare_next_question(
+                state,
+                language_calibration=language_calibration,
+            )
         if prepared_result.is_err:
             return Result.err(prepared_result.error)
         prepared = prepared_result.value
@@ -1099,6 +1121,51 @@ class InterviewEngine:
             question_length=len(question),
         )
         return Result.ok(question)
+
+    async def rephrase_pending_question(
+        self,
+        question: str,
+        calibration: InterviewCalibration,
+    ) -> Result[str, ProviderError]:
+        """Reword a whole pending question, or return it unchanged if over budget."""
+        if len(question) > MAX_REPHRASE_QUESTION_CHARS:
+            # Optional wording must not omit constraints to fit the prompt budget.
+            # The calibration handler treats unchanged output as a truthful fallback.
+            return Result.ok(question)
+        messages = [
+            Message(
+                role=MessageRole.SYSTEM,
+                content=(
+                    "Rephrase exactly one requirements-interview question at the requested "
+                    "language level. Preserve every decision, constraint, and acceptance "
+                    "meaning. Define unfamiliar jargon inline, do not answer the question, "
+                    "do not add architecture recommendations, and return only the rephrased "
+                    "question in the user's language.\n\n"
+                    f"{calibration.prompt_guidance()}"
+                ),
+            ),
+            Message(
+                role=MessageRole.USER,
+                content=(
+                    f"User-stated evidence:\n{calibration.evidence}\n\n"
+                    f"Pending question:\n{question}"
+                ),
+            ),
+        ]
+        assert self.model is not None
+        result = await self._require_llm_adapter().complete(
+            messages,
+            CompletionConfig(
+                model=self.model,
+                role="clarification",
+                model_is_explicit=self.model_is_explicit,
+                temperature=0.1,
+                max_tokens=min(self.max_tokens, 600),
+            ),
+        )
+        if result.is_err:
+            return Result.err(result.error)
+        return Result.ok(result.value.content.strip())
 
     async def _select_question_from_candidates(
         self,
@@ -1353,6 +1420,7 @@ class InterviewEngine:
         state: InterviewState,
         initial_context: str | None = None,
         max_chars: int | None = None,
+        language_calibration: InterviewCalibration | None = None,
         km_recall: KMRecall | None = None,
     ) -> str:
         """Build the system prompt for question generation.
@@ -1406,6 +1474,9 @@ class InterviewEngine:
                 f"{RESPONSE_CONTRACT}\n\n"
                 f"Initial context: {prompt_initial_context}\n"
             )
+
+        if language_calibration is not None:
+            dynamic_header += f"\n\n{language_calibration.prompt_guidance()}"
 
         # Answer prefix hints — always present so the question generator
         # can interpret enriched answers regardless of brownfield status.

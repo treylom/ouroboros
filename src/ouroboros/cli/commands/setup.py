@@ -23,6 +23,7 @@ from importlib import util as importlib_util
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import stat
 import subprocess
@@ -38,6 +39,10 @@ import yaml
 
 from ouroboros import package_profiles
 from ouroboros.bigbang.brownfield import scan_and_register, set_default_repo
+from ouroboros.cli.codex_mcp_launcher import (
+    is_setup_owned_codex_uvx_args,
+    release_codex_mcp_launcher,
+)
 from ouroboros.cli.commands import ooo_bridges
 from ouroboros.cli.commands.claude_setup import (
     setup_claude as _setup_claude,
@@ -48,6 +53,7 @@ from ouroboros.cli.commands.claude_setup import (
 from ouroboros.cli.commands.claude_setup import (
     setup_claude_sdk as _setup_claude_sdk,
 )
+from ouroboros.cli.commands.megacode_setup import detect_megacode_runtime, select_megacode_runtime
 from ouroboros.cli.commands.omp_setup import (
     detect_omp_runtime as _detect_omp_runtime,
 )
@@ -76,6 +82,7 @@ from ouroboros.cli.opencode_config import (
 from ouroboros.cli.opencode_config import (
     find_opencode_config,
     opencode_config_dir,
+    plugin_version_error,
 )
 from ouroboros.cli.opencode_config import (
     is_bridge_plugin_entry as _is_bridge_plugin_entry,
@@ -90,6 +97,9 @@ from ouroboros.cli.windows_codex_mcp import apply_windows_codex_mcp_mode, is_nat
 from ouroboros.codex.cli_policy import resolve_codex_cli_path
 from ouroboros.codex.home import resolve_codex_home
 from ouroboros.codex.runtime_profile import codex_uses_profile_v2 as _shared_codex_uses_profile_v2
+from ouroboros.codex.runtime_profile import (
+    existing_codex_profile_names as _existing_codex_profile_names,
+)
 from ouroboros.config._model_defaults import (
     DEFAULT_CONSENSUS_OPUS_MODEL,
     DEFAULT_OPUS_MODEL,
@@ -402,6 +412,7 @@ def _detect_runtimes() -> dict[str, str | None]:
 
     # OMP (Oh My Pi): omp_setup owns the explicit-path-config-then-PATH rule.
     runtimes["omp"] = _detect_omp_runtime()
+    runtimes["megacode"] = detect_megacode_runtime()
 
     # GJC: explicit-path config first, then PATH.
     try:
@@ -672,40 +683,23 @@ def _toml_string(value: str) -> str:
 
 
 def _codex_release_mcp_launcher() -> tuple[str, list[str]] | None:
-    """Resolve a launchable release MCP command for the current machine."""
-    uvx_path = shutil.which("uvx")
-    if uvx_path:
-        return uvx_path, list(_CODEX_UVX_MCP_ARGS)
-
-    ouroboros_path = shutil.which("ouroboros")
-    if ouroboros_path:
-        try:
-            result = subprocess.run(
-                [ouroboros_path, "mcp", "serve", "--help"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-                check=False,
-            )
-        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-            result = None
-        if result is not None and result.returncode == 0:
-            return ouroboros_path, list(_CODEX_DIRECT_MCP_ARGS)
-
-    if (
-        Path(sys.executable).is_file()
-        and os.access(sys.executable, os.X_OK)
-        and importlib_util.find_spec("mcp") is not None
-    ):
-        return sys.executable, list(_CODEX_MODULE_MCP_ARGS)
-    return None
+    """Resolve a pinned release launcher with current-environment fallbacks."""
+    return release_codex_mcp_launcher(
+        which=shutil.which,
+        run=subprocess.run,
+        executable=sys.executable,
+        find_spec=importlib_util.find_spec,
+        uvx_args=_CODEX_UVX_MCP_ARGS,
+        direct_args=_CODEX_DIRECT_MCP_ARGS,
+        module_args=_CODEX_MODULE_MCP_ARGS,
+    )
 
 
 def _render_codex_mcp_section() -> str | None:
     """Render the managed Codex MCP block for the current install source.
 
-    Release installs use ``uvx --isolated --from ouroboros-ai[mcp]`` so Codex
-    can bootstrap the MCP extra without reusing a conflicting installed tool.
+    Release installs pin ``uvx --from ouroboros-ai[mcp]==<installed version>``
+    so the MCP server cannot drift from the setup release.
     Dev/git installs must instead point Codex at this
     Python environment; otherwise setup silently downgrades the MCP server back
     to the latest PyPI release and hides main-branch fixes under test.
@@ -773,7 +767,11 @@ def _is_setup_managed_codex_mcp_entry(
         return False
 
     if Path(command).name == "uvx":
-        return tuple(str(arg) for arg in args) in _CODEX_LEGACY_UVX_MCP_ARGS
+        return is_setup_owned_codex_uvx_args(
+            [str(arg) for arg in args],
+            _CODEX_LEGACY_UVX_MCP_ARGS,
+            has_managed_comment=has_managed_comment,
+        )
     if Path(command).name == "ouroboros":
         args_tuple = tuple(str(arg) for arg in args)
         if has_managed_comment:
@@ -1245,9 +1243,9 @@ def _upsert_codex_mcp_section(raw: str, section: str) -> tuple[str, bool]:
     return "\n".join(output_lines).rstrip() + "\n", existed_before
 
 
-def _codex_uses_profile_v2(codex_path: str | None = None) -> bool:
+def _codex_uses_profile_v2(codex_path: str | None = None) -> bool | None:
     """Return whether ``codex --profile`` expects ``<name>.config.toml`` files."""
-    return _shared_codex_uses_profile_v2(codex_path, run_command=subprocess.run) is True
+    return _shared_codex_uses_profile_v2(codex_path, run_command=subprocess.run)
 
 
 def _register_codex_mcp_server(
@@ -1453,23 +1451,6 @@ def _render_toml_mapping(settings: _CodexProfileSettings, prefix: str = "") -> l
         lines.extend(_render_toml_mapping(value, section_name))
 
     return lines
-
-
-def _existing_codex_profile_names(raw: str) -> set[str]:
-    """Return configured Codex profile names from a TOML document."""
-    import tomllib
-
-    if not raw.strip():
-        return set()
-
-    parsed = tomllib.loads(raw)
-    profiles = parsed.get("profiles")
-    if profiles is None:
-        return set()
-    if not isinstance(profiles, dict):
-        msg = "Codex config contains a non-table 'profiles' key."
-        raise ValueError(msg)
-    return {str(name) for name in profiles}
 
 
 def _upsert_codex_profile_sections(raw: str) -> tuple[str, list[str]]:
@@ -1883,11 +1864,18 @@ def _register_codex_default_profiles(*, codex_path: str | None = None) -> None:
     """Register default Codex profile anchors for Ouroboros task profiles."""
     import tomllib
 
+    profile_v2 = _codex_uses_profile_v2(codex_path)
+    if profile_v2 is None:
+        print_warning(
+            "Cannot determine Codex profile format; check 'codex --help' and rerun setup."
+        )
+        return
+
     codex_config = resolve_codex_home() / "config.toml"
     codex_config.parent.mkdir(parents=True, exist_ok=True)
     raw = codex_config.read_text(encoding="utf-8") if codex_config.exists() else ""
 
-    if _codex_uses_profile_v2(codex_path):
+    if profile_v2:
         existing_v2_profiles = {
             name
             for name in _CODEX_DEFAULT_PROFILE_SECTIONS
@@ -1961,6 +1949,13 @@ def _register_codex_worker_profile(
     """Register the managed Codex worker profile in ~/.codex/config.toml."""
     import tomllib
 
+    profile_v2 = _codex_uses_profile_v2(codex_path)
+    if profile_v2 is None:
+        print_warning(
+            "Cannot determine Codex profile format; check 'codex --help' and rerun setup."
+        )
+        return False
+
     codex_config = resolve_codex_home() / "config.toml"
     codex_config.parent.mkdir(parents=True, exist_ok=True)
     expected_config = (
@@ -1981,7 +1976,7 @@ def _register_codex_worker_profile(
     else:
         raw = ""
 
-    if _codex_uses_profile_v2(codex_path):
+    if profile_v2:
         profile_path = codex_config.parent / f"{_CODEX_WORKER_PROFILE_NAME}.config.toml"
         legacy_profiles = _existing_codex_profile_names(raw)
         try:
@@ -4025,6 +4020,13 @@ def _strip_jsonc(text: str) -> str:
     return strip_jsonc(text)
 
 
+def _warn_if_opencode_jsonc_comments_removed(config_path: Path, original_text: str) -> None:
+    """Warn before rewriting an OpenCode config that contains JSONC comments."""
+    without_strings = re.sub(r'"(?:\\.|[^"\\])*"', '""', original_text, flags=re.DOTALL)
+    if "//" in without_strings or "/*" in without_strings:
+        print_warning(f"Note: JSONC comments in {config_path} were removed during config update.")
+
+
 def _find_opencode_config() -> Path:
     """Locate the existing OpenCode config file, or return a default path.
 
@@ -4055,10 +4057,12 @@ def _ensure_opencode_mcp_entry() -> bool:
     config_path.parent.mkdir(parents=True, exist_ok=True)
 
     data: dict = {}
+    original_text = ""
     if config_path.exists():
         try:
-            data = json.loads(_strip_jsonc(config_path.read_text()))
-        except (json.JSONDecodeError, OSError):
+            original_text = config_path.read_text(encoding="utf-8")
+            data = json.loads(_strip_jsonc(original_text))
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError):
             print_warning(
                 f"Could not parse {config_path} — skipping MCP registration to avoid "
                 "overwriting existing settings.  Fix the JSON syntax and re-run setup."
@@ -4139,16 +4143,7 @@ def _ensure_opencode_mcp_entry() -> bool:
             existing["timeout"] = 300000
         print_info("MCP server already registered — verified config.")
 
-    # Warn if we're about to overwrite a .jsonc file that contained comments.
-    if config_path.suffix == ".jsonc":
-        try:
-            original_text = config_path.read_text(encoding="utf-8")
-        except OSError:
-            original_text = ""
-        if "//" in original_text or "/*" in original_text:
-            print_warning(
-                f"Note: JSONC comments in {config_path} were removed during config update."
-            )
+    _warn_if_opencode_jsonc_comments_removed(config_path, original_text)
 
     # Write back as plain JSON.  This intentionally discards JSONC
     # comments — the same approach Claude and Codex setup use for their
@@ -4368,10 +4363,12 @@ def _ensure_opencode_plugin_entry() -> bool:
     config_path.parent.mkdir(parents=True, exist_ok=True)
 
     data: dict = {}
+    original_text = ""
     if config_path.exists():
         try:
-            data = json.loads(_strip_jsonc(config_path.read_text()))
-        except (json.JSONDecodeError, OSError):
+            original_text = config_path.read_text(encoding="utf-8")
+            data = json.loads(_strip_jsonc(original_text))
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError):
             print_warning(f"Could not parse {config_path} — skipping plugin registration.")
             return False
 
@@ -4400,16 +4397,7 @@ def _ensure_opencode_plugin_entry() -> bool:
 
     data["plugin"] = cleaned
 
-    # Warn if we're about to overwrite a .jsonc file that contained comments.
-    if config_path.suffix == ".jsonc":
-        try:
-            original_text = config_path.read_text(encoding="utf-8")
-        except OSError:
-            original_text = ""
-        if "//" in original_text or "/*" in original_text:
-            print_warning(
-                f"Note: JSONC comments in {config_path} were removed during config update."
-            )
+    _warn_if_opencode_jsonc_comments_removed(config_path, original_text)
 
     try:
         _atomic_write_text(config_path, json.dumps(data, indent=2) + "\n")
@@ -4445,18 +4433,19 @@ def _cleanup_plugin_artifacts() -> None:
     config_path = find_opencode_config(allow_default=False)
     if config_path is not None:
         try:
-            raw = config_path.read_text()
+            raw = config_path.read_text(encoding="utf-8")
             data = json.loads(_strip_jsonc(raw))
             plugins = data.get("plugin", [])
             if isinstance(plugins, list):
                 kept = [e for e in plugins if not _is_bridge_plugin_entry(e)]
                 if len(kept) != len(plugins):
                     data["plugin"] = kept
+                    _warn_if_opencode_jsonc_comments_removed(config_path, raw)
                     with config_path.open("w") as f:
                         json.dump(data, f, indent=2)
                         f.write("\n")
                     print_info(f"Removed bridge plugin entry from {config_path}")
-        except (json.JSONDecodeError, OSError, KeyError):
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError, KeyError):
             pass  # best effort
 
 
@@ -4479,12 +4468,12 @@ def _setup_opencode(opencode_path: str, mode: str = "plugin") -> bool:
     """
     if mode not in ("plugin", "subprocess"):
         raise ValueError(f"Invalid opencode mode: {mode!r} (expected 'plugin' or 'subprocess')")
+    if mode == "plugin" and (version_error := plugin_version_error(opencode_path)):
+        print_error(version_error)
+        return False
 
     from ouroboros.config.loader import create_default_config, ensure_config_dir
 
-    # Persist mode to config.yaml for both branches so the MCP runtime gate
-    # can read it later. Plugin branch still writes (no runtime_backend/cli
-    # fields — plugin runs in-process inside OpenCode; but mode signal matters).
     config_dir = ensure_config_dir()
     config_path = config_dir / "config.yaml"
     if config_path.exists():
@@ -4746,7 +4735,7 @@ def setup(
         typer.Option(
             "--runtime",
             "-r",
-            help="Runtime backend to configure (claude, claude-sdk, claude-cli, codex, opencode, hermes, gemini, goose, kiro, copilot, pi, omp, gjc, antigravity, grok, zcode, host).",
+            help="Runtime backend to configure (claude, claude-sdk, claude-cli, codex, opencode, hermes, gemini, goose, kiro, copilot, pi, omp, gjc, antigravity, grok, zcode, megacode, host).",
         ),
     ] = None,
     non_interactive: Annotated[
@@ -5013,6 +5002,8 @@ def setup(
         _setup_pi(pi_path)
     elif selected in ("omp", "omp_cli"):
         select_omp_runtime(available)
+    elif selected in ("megacode", "megacode_cli"):
+        select_megacode_runtime(available)
     elif selected in ("gjc", "gajae-code", "gajae_code"):
         gjc_path = available.get("gjc")
         if not gjc_path:

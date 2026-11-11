@@ -39,7 +39,7 @@ ouroboros [OPTIONS] COMMAND [ARGS]...
 | Command | Description |
 |---------|-------------|
 | `setup` | Detect runtimes and configure Ouroboros for your environment |
-| `init` | Start interactive interview to refine requirements |
+| `init` / `interview` | Start an interactive interview (`interview` is an alias of `init`) |
 | `auto` | Run bounded goal → A-grade Seed → execution handoff pipeline |
 | `job` | Inspect detached job status, waits, results, and event streams |
 | `run` | Execute Ouroboros workflows |
@@ -56,9 +56,10 @@ ouroboros [OPTIONS] COMMAND [ARGS]...
 | `plugin` | Manage UserLevel plugins (install, list, remove) |
 | `pm` | Product Management interview for requirements gathering |
 | `doctor` | Diagnose configuration and runtime health |
-| `detect` | Detect available runtime backends |
+| `detect` | Inspect a project once with an LLM and write validated Stage 1 commands to `.ouroboros/mechanical.toml` |
 | `artifacts` | Manage and inspect execution artifacts |
-| `harness` | Manage runtime harness configurations |
+| `harness` | Inspect and compare exported auto-interview traces |
+| `resume` | List in-flight sessions from the EventStore and show re-attachment commands |
 | `codex` | Codex-specific setup and configuration |
 | `seed` | Generate or inspect seed specifications |
 | `workflow-ir` | Inspect workflow intermediate representation |
@@ -90,8 +91,55 @@ ouroboros auto "Build a local-first habit tracker CLI"
 | `--skip-run` | Stop after creating an A-grade Seed |
 | `--show-ledger` | Print assumptions and non-goals captured during auto convergence |
 | `--status` | Print the persisted state for `--resume <id>` without running |
+| `--requester-command CMD` | Ask the requester instead of assuming (off by default; see below). Overrides `OUROBOROS_AUTO_REQUESTER_COMMAND` |
+| `--requester-timeout SECONDS` | Seconds to wait for one requester answer before keeping auto's draft (default 300). Overrides `OUROBOROS_AUTO_REQUESTER_TIMEOUT_SECONDS` |
 
 Auto mode starts execution only after the generated Seed reaches A-grade. If a phase times out or hits a hard blocker, the command prints the auto session id and a resume command instead of hanging indefinitely.
+
+### Asking the requester instead of assuming
+
+Auto answers interview questions itself. When a draft answer has source
+`conservative_default` or `assumption`, auto is guessing. With
+`--requester-command CMD` (or `OUROBOROS_AUTO_REQUESTER_COMMAND`), auto asks the
+requester at exactly those questions and still answers every other question
+itself.
+
+For each such question, auto runs `CMD` once. The command is split like a
+shell command (`shlex.split`) but runs without a shell. Its stdin is one JSON
+object:
+
+```json
+{"question": "...", "goal": "...", "draft_answer": "...", "draft_source": "conservative_default", "round": 3}
+```
+
+Its stdout is either `{"answer": "..."}` or plain text. A nonempty answer
+replaces the draft. A timeout, a nonzero exit, an empty answer, or a JSON object
+without a string `answer` keeps the draft. The option wins over the variable,
+and `--requester-command ""` turns the requester off. The command is read again
+on every invocation and is not stored in the session, so pass it again with
+`--resume`.
+
+Where the answers are recorded:
+
+- The interview transcript gets `[from-auto][requester] <answer>` in place of the
+  draft (`rounds[].user_response` in
+  `~/.ouroboros/data/interview_<interview_session_id>.json`).
+- In the auto session file (`~/.ouroboros/data/<auto_session_id>.json`),
+  `auto_answer_log[].source` is `requester`. `requester_log` has one entry per
+  question sent to the requester: `round`, `question`, `draft_source`,
+  `draft_answer`, `outcome` (`answered`, `timeout`, `nonzero_exit`,
+  `empty_answer`, `invalid_output` or `launch_failed`), `used`, `answer`,
+  `detail` and `elapsed_seconds`. The key is absent when no question went to the
+  requester. Text fields in both logs are cut to 200 characters; the full
+  answer is in the interview transcript.
+- Each question also emits an `auto.interview.requester_asked` event (fields
+  `round`, `draft_source`, `outcome`, `used`, `detail`, `elapsed_seconds`,
+  `question`) to the event store.
+
+Time spent waiting for the requester counts against the interview phase
+timeout (`OUROBOROS_PHASE_TIMEOUT_INTERVIEW_SECONDS`, default 600 seconds).
+The requester is available from the CLI only; the MCP auto tools do not use it
+yet.
 
 ### Detached `auto` wait and retrieve
 
@@ -259,7 +307,7 @@ ouroboros setup [OPTIONS]
 
 | Option | Description |
 |--------|-------------|
-| `-r, --runtime TEXT` | Runtime backend to configure. Shipped values: `claude`, `claude-sdk`, `claude-cli`, `codex`, `opencode`, `hermes`, `gemini`, `goose`, `kiro`, `copilot`, `pi`, `omp`, `gjc`, `antigravity`, `grok`, `zcode`, `host`. Auto-detected if omitted |
+| `-r, --runtime TEXT` | Runtime backend to configure. Shipped values: `claude`, `claude-sdk`, `claude-cli`, `codex`, `opencode`, `hermes`, `gemini`, `goose`, `kiro`, `copilot`, `pi`, `omp`, `gjc`, `antigravity`, `grok`, `zcode`, `megacode`, `host`. Auto-detected if omitted |
 | `--opencode-mode TEXT` | OpenCode integration mode: `plugin` (default, recommended — bridge plugin for interactive sessions) or `subprocess` (headless/CI). Mutually exclusive — see [OpenCode runtime guide](runtime-guides/opencode.md#configuration) |
 | `--non-interactive` | Skip interactive prompts (for scripted installs) |
 | `--mcp-mode TEXT` | Codex MCP config mode: `auto` (default), `preserve`, `stdio`, or native-Windows-only explicit `http` |
@@ -292,6 +340,10 @@ ouroboros setup --runtime claude
 # Explicitly select Kiro CLI as runtime backend (writes ~/.kiro/settings/mcp.json)
 ouroboros setup --runtime kiro
 
+# Keep backend copilot, but opt into experimental live ACP execution
+ouroboros setup --runtime copilot
+ouroboros config set orchestrator.copilot_transport acp
+
 # Explicitly select Zcode as a runtime-only backend
 ouroboros setup --runtime zcode
 
@@ -301,6 +353,13 @@ ouroboros setup --non-interactive
 
 **What setup does:**
 
+Copilot's runtime token remains `copilot` for setup, run, and MCP commands;
+`copilot-acp` is not a separate `--runtime` value. ACP is a transport setting,
+with default `cli`. `orchestrator.copilot_acp_fallback` defaults to `true`, but
+only permits pre-prompt read-only/tool-less fallback. LLM-only flows remain on
+the existing CLI adapter. See [the ACP guide](runtime-guides/copilot-acp.md)
+for permissions, authentication and streaming diagnostics.
+
 - Detects configured paths and PATH entries for the shipped runtimes, including `zcode` and the macOS ZCode app-bundle script
 - Prompts you to select a runtime if multiple are found (or auto-selects if only one)
 - Writes `orchestrator.runtime_backend` to `~/.ouroboros/config.yaml`
@@ -309,8 +368,10 @@ ouroboros setup --non-interactive
 - For Codex CLI: sets `orchestrator.codex_cli_path` and `llm.backend: codex` in `~/.ouroboros/config.yaml`
 - For Codex CLI: installs managed Ouroboros rules into `~/.codex/rules/`
 - For Codex CLI: installs managed Ouroboros skills into `~/.codex/skills/`
+- For Codex release installs using `uvx`: pins the MCP package to the installed setup version (`ouroboros-ai[mcp]==<version>`). Source/dev installs keep serving their current Python environment.
 - For Codex CLI: registers or refreshes setup-managed stdio blocks on supported hosts and preserves user-managed URL/custom blocks by default. A legacy PATH-selected `ouroboros mcp serve` entry with the canonical Codex environment is migrated to the isolated managed launcher; custom executable paths and extra process controls remain untouched. Native Windows `auto` creates no MCP child, `stdio` is refused, and explicit `http` writes the loopback URL only after resolving a launchable MCP command; the operator owns that visible server process.
 - For Codex CLI: adds missing Ouroboros task profiles whose per-role reasoning effort is passed to each `codex exec` invocation; it retires only untouched legacy generated profile anchors and preserves user-created Codex profiles
+- For Codex CLI: reads `codex --help` as UTF-8 to determine the worker-profile format. If the probe fails or the format is unknown, setup reports failure and rolls back its managed changes instead of assuming a legacy profile. Check that the configured Codex executable's `--help` succeeds, then rerun setup.
 - For OpenCode: registers the Ouroboros MCP server in OpenCode's configuration
 - For OpenCode (plugin mode): installs the bridge plugin into `<opencode_config_dir>/plugins/ouroboros-bridge/`
 - For OpenCode: installs the runtime skill capability guide into global `AGENTS.md` in the active OpenCode config directory
@@ -364,6 +425,10 @@ Start interactive interview to refine requirements (Big Bang phase).
 **Shorthand:** `ouroboros init "context"` is equivalent to `ouroboros init start "context"`.
 When the first argument is not a known subcommand (`start`, `list`), it is treated as the context for `init start`.
 
+The top-level `interview` command is an alias for the same command group, so
+`ouroboros interview start "context"` and `ouroboros interview list` have the
+same behavior as their `init` counterparts.
+
 ### `init start`
 
 Start an interactive interview to transform vague ideas into clear, executable requirements.
@@ -386,7 +451,7 @@ ouroboros init [start] [OPTIONS] [CONTEXT]
 | `--state-dir DIRECTORY` | Custom directory for interview state files |
 | `-o, --orchestrator` | Use Claude Code for the interview/seed flow; combine with `--runtime` to choose the workflow handoff backend |
 | `--runtime TEXT` | Agent runtime backend for the workflow execution step after seed generation. Shipped values: `claude`, `codex`, `opencode`, `hermes`, `gemini`, `goose`, `kiro`, `copilot`, `pi`, `omp`, `gjc`, `antigravity`, `grok`, `zcode`. Custom adapters registered in `runtime_factory.py` are also accepted. |
-| `--llm-backend TEXT` | LLM backend for interview, ambiguity scoring, and seed generation (`claude_code`, `litellm`, `codex`, `copilot`, `opencode`, `gemini`, `goose`, `kiro`, `pi`, `omp`, `zcode`, `dsh`). `dsh` needs two more settings — see [the DeepSeek Harness guide](guides/deepseek-harness.md). |
+| `--llm-backend TEXT` | LLM backend for interview, ambiguity scoring, and seed generation (`claude_code`, `litellm`, `codex`, `copilot`, `opencode`, `gemini`, `goose`, `kiro`, `pi`, `omp`, `zcode`, `dsh`, `megacode`). `dsh` needs two more settings — see [the DeepSeek Harness guide](guides/deepseek-harness.md). |
 | `-d, --debug` | Show verbose logs including debug messages |
 | `-m, --model TEXT` | Model for every role in this command: `auto` (latest of each role's tier), `frugal`, `standard`, `frontier`, or a model id. Tier names work on every backend; Claude aliases such as `opus` only on Claude backends. Default: `models.default` in config (`auto`) |
 | `--pin-models/--no-pin-models` | Run the per-role model ids saved in config for this command (research and reproducibility). Default: `models.pin` in config (off) |
@@ -435,6 +500,70 @@ ouroboros init list [OPTIONS]
 
 ---
 
+
+## `ouroboros detect`
+
+For projects with recognized manifests, use one LLM call to propose lint, build,
+test, and static-analysis commands and persist validated commands to
+`.ouroboros/mechanical.toml`. The CLI initializes the selected LLM adapter before
+discovery, even when the project has no manifests. That backend's initialization
+requirements must therefore be satisfied; for example, selecting `litellm`
+requires its optional package and a supported Python version. If initialization fails, the command exits with
+`Could not initialize LLM adapter` before discovery and writes no configuration.
+After successful initialization, a manifest-free, discoverable standard-library
+`unittest.TestCase` suite under `tests/` uses deterministic discovery without an
+LLM call. Modules or packages with a custom `load_tests` hook do not establish
+a discoverable suite from their visible test classes, because the hook can replace
+those tests. Another ordinary module can still establish a suite; otherwise no
+configuration is produced. An empty project also produces no configuration. If the file already exists,
+the command leaves it unchanged without initializing an adapter unless `--force`
+is passed. This command
+authors the deterministic Stage 1 configuration; it does not detect installed
+runtime backends.
+
+```bash
+ouroboros detect [OPTIONS] [PATH]
+```
+
+| Option | Description |
+|--------|-------------|
+| `-f, --force` | Re-detect and overwrite an existing `.ouroboros/mechanical.toml` |
+| `--backend TEXT` | Select the LLM adapter initialized before discovery (`claude`, `codex`, `gemini`, `opencode`, or `litellm`); only manifest-backed inspection makes an LLM call |
+
+## `ouroboros harness`
+
+Read and compare auto-interview trace projections. The command lists runs,
+renders summaries and outcomes, searches the five JSONL trace streams, compares
+two runs, or ranks runs by an outcome metric. It does not manage runtime harness
+configuration. When persisted auto state exists without an exported trace, a
+requested run may be projected on demand into `.ouroboros/traces/<run_id>/`.
+
+```bash
+ouroboros harness list
+ouroboros harness show RUN_ID
+ouroboros harness trace RUN_ID --grep PATTERN [--stream NAME]
+ouroboros harness diff RUN_A RUN_B
+ouroboros harness frontier --metric NAME
+```
+
+## `ouroboros resume`
+
+List running or paused sessions directly from the EventStore after an MCP
+disconnect. The command opens the store read-only and shows identifiers and
+commands for inspection, monitoring, and resuming execution; it does not resume
+a session by itself.
+
+```bash
+ouroboros resume [--all] [--list]
+```
+
+By default, the 20 most recent in-flight sessions are shown. Pass `--all` to
+show every in-flight session. After listing sessions, the command prompts for
+a session and prints re-attachment guidance. Pass `--list` (`-l`) to print the
+table and exit without prompting, for example from scripts or agents.
+
+---
+
 ## `ouroboros run`
 
 Execute Ouroboros workflows.
@@ -467,13 +596,13 @@ ouroboros run [workflow] [OPTIONS] SEED_FILE
 | `-r, --resume TEXT` | Resume a previous orchestrator session by ID. A run continues only while the process that started it holds its live state (its check package's held-out cases never leave that process); resumed from a new process, the run is recorded as failed and a new attempt starts from the project, while the interrupted attempt's work stays on its task branch |
 | `--mcp-config PATH` | Path to MCP client configuration YAML file |
 | `--mcp-tool-prefix TEXT` | Prefix to add to all MCP tool names (e.g., `mcp_`) |
-| `-s, --sequential` | Execute ACs sequentially instead of in parallel |
+| `-s, --sequential` | Execute ACs sequentially instead of in parallel; the same atomic evidence checks apply, including rejection and retry guidance for malformed receipts backed by a current-attempt trusted-wrapper run |
 | `--max-decomposition-depth INTEGER` | Maximum recursive AC decomposition depth (any non-negative integer; default `2`). Values `0..4` are eligible for Routing D durable replay. Larger legacy values remain executable but do not publish the Routing D parallel resume-owner guarantee. The same contract applies to `OUROBOROS_MAX_DECOMPOSITION_DEPTH` and `seed.orchestrator.max_decomposition_depth` |
 | `-n, --dry-run` | Validate seed without executing. **Currently only takes effect with `--no-orchestrator`.** In default orchestrator mode this flag is accepted but has no effect — the full workflow executes |
 | `--no-qa` | Skip post-execution QA evaluation |
 | `--auto-evaluate/--no-auto-evaluate` | After the run finishes (completed or failed), enqueue formal evaluation of the directory the run executed in (inside its task worktree) and wait for its result, as `ooo run` does. A paused or cancelled run is not evaluated. Default: `execution.auto_evaluate` in config (on) |
 | `--auto-evolve/--no-auto-evolve` | When formal evaluation is not approved, continue into the bounded Ralph job the evaluation chains and wait for its result. Default: `execution.auto_evolve` in config (on) |
-| `--check-package/--no-check-package` | Build executable checks from the acceptance criteria before the worker starts, admit them on the current tree, and let them decide the criteria they cover (the existing verifier stays advisory for those and decides the rest). On by default; `--no-check-package` opts out for this run. Default: `OUROBOROS_CHECK_PACKAGE` (only the exact value `on` turns it on; any other set value, such as `1`, `true` or `ON`, means off), then `boundary.check_package` in config, then on. The checks are model-written Python scripts: they run on throwaway copies of the project with the project's interpreter, a per-check timeout, and an allowlisted environment, confined by the execution sandbox (they can write only inside their copy and a scratch directory, and have no network); they can read files you can read. Where the sandbox is unavailable, a check is undecided and does not run. The same switch applies to `ooo run` from a plugin host, meaning the in-process `ouroboros_execute_seed` / `ouroboros_start_execute_seed` path; an execution dispatched to the OpenCode plugin's child session is not governed and reports `check_package: not_applied`. Only Claude Code and Codex CLI can construct checks; with another runtime the existing verifier decides the run. |
+| `--check-package/--no-check-package` | Build executable checks from the acceptance criteria before the worker starts, admit them on the current tree, and run them on the finished workspace. By default they only record what they would have decided (record mode): no criterion or run outcome changes and the worker gets no repair turn. `--check-package` lets them decide the criteria they cover for this run (the existing verifier stays advisory for those and decides the rest); `--no-check-package` turns them off for this run. Default: `OUROBOROS_CHECK_PACKAGE` (exactly `decide`, `on` (the same as `decide`), `record` or `off`; any other set value, such as `1`, `true` or `ON`, means off), then `boundary.check_package` in config, then `record`. The checks are model-written Python scripts: they run on throwaway copies of the project with the project's interpreter, a per-check timeout, and an allowlisted environment, confined by the execution sandbox (they can write only inside their copy and a scratch directory, and have no network); they can read files you can read. Where the sandbox is unavailable, a check is undecided and does not run. The same switch applies to `ooo run` from a plugin host, meaning the in-process `ouroboros_execute_seed` / `ouroboros_start_execute_seed` path; an execution dispatched to the OpenCode plugin's child session is not governed and reports `check_package: not_applied`. Only Claude Code and Codex CLI can construct checks; with another runtime the existing verifier decides the run. |
 | `-m, --model TEXT` | Model for every role in this run, the check package and the evaluation it continues into included: `auto` (latest of each role's tier), `frugal`, `standard`, `frontier`, or a model id. Tier names work on every backend; Claude aliases such as `opus` only on Claude backends. Default: `models.default` in config (`auto`) |
 | `--pin-models/--no-pin-models` | Run the per-role model ids saved in config for this run (research and reproducibility). Default: `models.pin` in config (off) |
 | `-d, --debug` | Show logs and agent thinking (verbose output) |
@@ -508,7 +637,11 @@ ouroboros run seed.yaml --no-auto-evolve
 # Run every role on the frontier tier
 ouroboros run seed.yaml --model frontier
 
-# Opt out of the check package for this run (or: OUROBOROS_CHECK_PACKAGE=off,
+# Let the check package decide for this run instead of only recording
+# (or: OUROBOROS_CHECK_PACKAGE=decide, or boundary.check_package: decide)
+ouroboros run seed.yaml --check-package
+
+# Turn the check package off for this run (or: OUROBOROS_CHECK_PACKAGE=off,
 # or boundary.check_package: off in ~/.ouroboros/config.yaml)
 ouroboros run seed.yaml --no-check-package
 
@@ -583,12 +716,16 @@ ouroboros cancel execution [OPTIONS] [EXECUTION_ID]
 |--------|-------------|
 | `-a, --all` | Cancel all running/paused executions |
 | `-r, --reason TEXT` | Reason for cancellation (default: "Cancelled by user via CLI") |
+| `-l, --list` | List active executions and exit without prompting or cancelling |
 
 **Examples:**
 
 ```bash
 # Interactive mode - list active executions and pick one
 ouroboros cancel execution
+
+# List active executions without prompting (scripts, agents)
+ouroboros cancel execution --list
 
 # Cancel a specific execution by session ID
 ouroboros cancel execution orch_abc123def456
@@ -772,6 +909,11 @@ ouroboros config set KEY VALUE
 | `KEY` | Yes | Configuration key (dot notation) |
 | `VALUE` | Yes | Value to set |
 
+Boolean settings accept `true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off`,
+`t`/`f`, and `y`/`n` (case-insensitive). Other values, including empty strings
+and values with surrounding whitespace, are rejected with a nonzero exit code;
+the configuration file and any existing undo backup remain unchanged.
+
 **Examples:**
 
 ```bash
@@ -948,6 +1090,43 @@ ouroboros update --runtime none -y
 5. Re-runs `ouroboros setup --runtime <rt> --non-interactive` for a single selected
    runtime, or `ouroboros setup refresh` for `--runtime all`
 
+For a uv installation, the updater first checks the active root package's
+recorded version constraint against the selected PyPI target. A conflicting
+pin, bound, or exclusion exits with code 1 before confirmation or package
+mutation, including with `--dry-run`. The diagnostic identifies the constraint,
+target and receipt, and explains how to deliberately revise the original install
+command while preserving its uv root, executable directory, Python, extras,
+additional requirements and index/options. It never removes the constraint or
+rewrites the receipt. Compatible ranges and wildcards retain the normal upgrade
+path; additional packages' constraints are left to uv. `--check` remains a
+version-only query and does not inspect the installation receipt. Package upgrade
+success is reported only after the installed version has been verified.
+
+Older environments without `packaging` can still start the updater, check
+versions, and upgrade unconstrained uv installations. If their receipt contains
+a root constraint or marker, validation stops before mutation with a diagnostic
+to restore `packaging` using the original manager and installation options.
+The updater does not guess whether that constraint permits the target.
+
+If the package upgrade is verified but a required integration refresh fails,
+the command reports a partial update and exits with code `1`. Each failed step
+prints its recovery command, including the selected executable and any explicit
+runtime CLI override. Codex setup retains `--preserve-existing-llm`; OpenCode
+setup retains the selected mode. After resolving the reported cause, run the
+commands in the same environment so settings such as `HOME` and `CODEX_HOME`
+still select the original installation. Windows instructions use PowerShell;
+other platforms use a POSIX shell. Apply any listed follow-up command only after
+the preceding command succeeds. In PowerShell, check `$LASTEXITCODE` for the
+native command's result only after the executable actually starts; the
+environment-restoration block can change `$?`. PowerShell errors while starting
+the executable or preparing the recovery helper are failures even if an earlier
+`$LASTEXITCODE` is still `0`. Resolve those errors before running any follow-up
+command.
+
+Once the package is current, rerunning `ouroboros update` exits as up to date
+without retrying failed integration refreshes. Use the printed recovery commands
+instead. This guidance does not repair a failed package-manager upgrade.
+
 With `--runtime auto` (the default), an existing configured backend is preserved. Only an unconfigured installation probes for the `claude` CLI first and then `codex`; when neither is found the runtime refresh is skipped with a notice and the package upgrade still completes. Existing OpenCode integrations also preserve their mutually exclusive `plugin` or `subprocess` mode. Runtime executable selection preserves the supported environment override before the persisted `orchestrator.*_cli_path`, then PATH; the exact validated executable is reused for plugin and setup refresh so a stale PATH binary cannot replace it. Runtime setup and the post-update version check always use the console script inside the same proven package environment, including `.exe`/`PATHEXT` launcher resolution on native Windows.
 
 With `--runtime all`, the updater refreshes the Claude plugin, the Codex
@@ -956,6 +1135,27 @@ Ouroboros marketplace, and all previously installed runtime artifacts through
 backend. Claude can apply the new plugin with `/reload-plugins` or a restart;
 active Codex sessions must restart because Codex does not currently retain an
 in-use plugin generation during marketplace cache rotation.
+
+When Codex is selected (`--runtime codex`, `auto` resolving to Codex, or `all`),
+the updater also reports the installed `ouroboros@ouroboros` plugin version.
+This read-only check runs after runtime refresh and on `--check` or an already
+current package. It queries the same configured Codex executable with
+`plugin list --marketplace ouroboros --json`, rather than inferring an installed
+version from available releases or cached directories. After an upgrade, the
+comparison uses the newly verified package version.
+
+A different plugin version produces a warning with both versions. Inspect the
+marketplace ref before deciding whether to update that integration: a pinned
+release may intentionally differ, and refreshing the same pinned ref will not
+advance it. The diagnostic never changes refs or configuration, and does not
+certify the version loaded by an already-running Codex session or MCP server.
+An unavailable CLI, unsupported command, five-second timeout, or unreadable
+inventory is reported as **unknown**, separately from **not installed**.
+Inventory with more than 64 nested object/array containers (including the root)
+is also **unknown**, consistently across supported Python versions.
+These advisory results do not change the update command's exit status.
+An editable package reporting `0.0.0` is shown without inferring version drift.
+Other selected runtimes, `--runtime none`, and `--dry-run` skip this query.
 
 > **Installation identity:** the updater does not guess from global tool lists,
 > PATH order, directory names, or the selected runtime. If the receipt is
@@ -1225,6 +1425,36 @@ The snapshot covers OS, architecture, Python, current executable, installed `our
 ouroboros mcp doctor [--json] [--machine-snapshot]
 ```
 
+### `mcp doctor-runtime`
+
+Show bounded, read-only runtime metadata for local MCP diagnostics. `--json`
+emits typed fields for fixed PATH executable provenance and collisions,
+ephemeral IPv4/IPv6 loopback bindability, and metadata for Ouroboros's own MCP
+PID registry.
+
+Human-readable output shows the bounded executable candidates and collisions,
+unavailable reasons, loopback results, and each registry record's metadata.
+The registry location is displayed using the stable label
+`~/.ouroboros/mcp-servers`; the resolved absolute home path is not included.
+
+The command reads only `PATH` and the home-location information used by the
+server's normal `Path.home()` lookup (including a `HOME` override on POSIX).
+The resolved home and absolute registry path are used only for the bounded
+registry lookup; neither value is included in output or stored. PATH candidate
+and collision paths under that home are displayed with a `~` prefix in both
+JSON and human output after lexical dot-segment normalization; paths outside
+that home retain their location provenance. It reads no
+configuration, registry contents, process arguments, or credentials, executes
+no commands, connects to no network, and does not mutate the machine. PATH
+and registry scans have fixed bounds. Loopback probes only bind an ephemeral
+socket and close it immediately. An invalid or unresolvable home location
+reports registry status `not_checked` with reason `owner_unavailable`, without
+including the location or exception details.
+
+```bash
+ouroboros mcp doctor-runtime [--json]
+```
+
 ### `mcp serve`
 
 Start the MCP server to expose Ouroboros tools to Claude Desktop or other MCP clients.
@@ -1247,7 +1477,7 @@ ouroboros mcp serve [OPTIONS]
 | `--workspace-root TEXT` | Confines seed execution to directories under this path. Repeatable. Strongly recommended for network binds; unset means a caller may name any existing directory on the machine as an agent working tree. |
 | `--db TEXT` | Path to the EventStore database file |
 | `--runtime TEXT` | Agent runtime backend for orchestrator-driven tools (`claude`, `claude-sdk`, `claude-cli`, `codex`, `opencode`, `hermes`, `gemini`, `copilot`, `goose`, `kiro`, `pi`, `omp`, `gjc`, `antigravity`, `grok`, `zcode`). The MCP 2 server rejects SDK-backed `claude`/`claude-sdk`; use `claude-cli` for its out-of-process Claude worker. |
-| `--llm-backend TEXT` | LLM backend for interview/seed/evaluation tools (`claude_code`, `litellm`, `codex`, `copilot`, `opencode`, `gemini`, `goose`, `kiro`, `pi`, `omp`, `zcode`, `dsh`). Affects which tool variants are instantiated |
+| `--llm-backend TEXT` | LLM backend for interview/seed/evaluation tools (`claude_code`, `litellm`, `codex`, `copilot`, `opencode`, `gemini`, `goose`, `kiro`, `pi`, `omp`, `zcode`, `dsh`, `megacode`). Affects which tool variants are instantiated |
 
 **Examples:**
 
@@ -1347,6 +1577,44 @@ orchestrator:
 
 Override per-session with the `OUROBOROS_AGENT_RUNTIME` environment variable if needed.
 
+### `mcp doctor`
+
+Run fast, read-only environment diagnostics. The default command does not
+start a server:
+
+```bash
+ouroboros mcp doctor
+ouroboros mcp doctor --json
+```
+
+Use the opt-in local stdio probe when the environment checks pass but an MCP
+host still cannot discover Ouroboros:
+
+```bash
+ouroboros mcp doctor --probe-local-stdio
+```
+
+The probe launches this installation's own server with the current Python
+interpreter in isolated mode, with a temporary home and working directory.
+It loads the production server composition directly, bypassing shell profiles,
+project dotenv files, update checks, and normal CLI startup. Network and child
+command execution are disabled inside the probe. It reports stable stages for local
+startup/stdio transport, protocol discovery, and expected tool recognition.
+It lists tools but never calls one. The child uses stdio only, has telemetry
+disabled, does not read configured MCP launch commands, and cannot modify the
+user's Ouroboros configuration, EventStore, or PID registry. The temporary
+child and its isolated state are cleaned up on both success and failure.
+Transport success is observed before protocol discovery, and a cleanup failure
+causes the probe to fail even when tool discovery succeeded. The three diagnostic
+stage results remain unchanged; teardown failures add a `local_stdio_cleanup`
+failure result and force the overall exit status to 1.
+
+This first diagnostic increment does not probe configured or third-party MCP
+servers, execute arbitrary launchers, open a network transport, inventory the
+whole machine, invoke an LLM, or repair the installation. A failed probe is a
+normal Doctor failure: all emitted stages remain visible and the command exits
+with status 1.
+
 ### `mcp info`
 
 Show MCP server information and available tools.
@@ -1360,7 +1628,7 @@ ouroboros mcp info [OPTIONS]
 | Option | Description |
 |--------|-------------|
 | `--runtime TEXT` | Agent runtime backend for orchestrator-driven tools (`claude`, `codex`, `opencode`, `hermes`, `gemini`, `copilot`, `goose`, `kiro`, `pi`, `omp`, `gjc`, `antigravity`, `grok`, `zcode`). Affects which tool variants are instantiated |
-| `--llm-backend TEXT` | LLM backend for interview/seed/evaluation tools (`claude_code`, `litellm`, `codex`, `copilot`, `opencode`, `gemini`, `goose`, `kiro`, `pi`, `omp`, `zcode`, `dsh`). Affects which tool variants are instantiated |
+| `--llm-backend TEXT` | LLM backend for interview/seed/evaluation tools (`claude_code`, `litellm`, `codex`, `copilot`, `opencode`, `gemini`, `goose`, `kiro`, `pi`, `omp`, `zcode`, `dsh`, `megacode`). Affects which tool variants are instantiated |
 
 **Available Tools:**
 
@@ -1402,6 +1670,8 @@ The table below covers the most commonly used variables. For the full list — i
 | `OUROBOROS_AGENT_RUNTIME` | `orchestrator.runtime_backend` | Override the runtime backend (`claude_mcp` for Claude CLI, `claude` for the isolated SDK runtime, or another supported runtime) |
 | `OUROBOROS_RUNTIME` | `orchestrator.runtime_backend` (fallback) | Shortcut env var honored by both `orchestrator.runtime_backend` and `llm.backend` resolution when their dedicated env vars are unset |
 | `OUROBOROS_KIRO_CLI_PATH` | `orchestrator.kiro_cli_path` | Explicit path to `kiro-cli` binary when it is not on `PATH` |
+| `OUROBOROS_COPILOT_TRANSPORT` | `orchestrator.copilot_transport` | `cli` (default) or experimental `acp`; backend remains `copilot`. Trusted environment only |
+| `OUROBOROS_COPILOT_ACP_FALLBACK` | `orchestrator.copilot_acp_fallback` | Boolean, default `true`; read-only/tool-less fallback before prompt submission only. No auth fallback or prompt replay |
 | `OUROBOROS_AGENT_PERMISSION_MODE` | `orchestrator.permission_mode` | Stored runtime preference; runner-driven seed execution forces the native `bypassPermissions` equivalent for fresh and resumed dispatches wherever the backend exposes an approval surface. OpenCode maps it to `--dangerously-skip-permissions`; Pi and GJC have no separate approval flag and already run headlessly without an approval dialogue |
 | `OUROBOROS_MODEL_TIER_ROUTING` | — | Model-tier routing is enabled by default. Set to `0`, `off`, or `false` (case- and whitespace-insensitive) to disable it completely |
 | `OUROBOROS_SHADOW_REPLAY` | — | Arms the opt-in shadow-baseline experiment only for `1`, `true`, or `on`. Current live decompositions are quarantined before baseline model dispatch because they lack deterministic MECE attestation; bundled runtimes also lack the required isolation attestation |
@@ -1417,6 +1687,10 @@ The table below covers the most commonly used variables. For the full list — i
 | `OUROBOROS_GENERATION_NO_PROGRESS_TIMEOUT_SECONDS` | `runtime_controls.generation_no_progress_timeout_seconds` | Stop an evolve generation after activity continues without material progress |
 | `OUROBOROS_GENERATION_SAFETY_TIMEOUT_SECONDS` | `runtime_controls.generation_safety_timeout_seconds` | Optional final hard cap for one generation; `0` disables it |
 | `OUROBOROS_WATCHDOG_POLL_SECONDS` | `runtime_controls.watchdog_poll_seconds` | EventStore polling interval for generation watchdog decisions |
+
+Copilot ACP is an exception to runner-requested unrestricted approval:
+`bypassPermissions` is capped to `acceptEdits`, with an exact native tool
+envelope and one-shot permission decisions.
 
 ---
 

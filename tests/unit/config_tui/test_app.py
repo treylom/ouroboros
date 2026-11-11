@@ -324,7 +324,7 @@ async def test_explicit_stage_agent_not_affected_by_global_change(app_env) -> No
         model_select = pilot.app.query_one(f"#stage-model-{stage}", Select)
         assert model_select.value == "default"
         values = {value for _, value in model_select._options}
-        assert "gpt-5" in values
+        assert "gpt-6.1-sol" in values
         assert "claude-opus-4-8" not in values  # stale global catalog was not applied
 
 
@@ -352,6 +352,55 @@ async def test_dynamic_model_listing_merges_into_select(app_env, monkeypatch) ->
         assert "openai/gpt-5.2-codex" in values  # fetched entries merged
         assert "default" in values  # static catalog kept first
         assert model_select.value == "default"  # selection not displaced
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("extra_count", [0, 300])
+async def test_minimax_discovery_preserves_saved_selection_and_custom_entry(
+    app_env, monkeypatch, extra_count
+) -> None:
+    legacy = "minimax/MiniMax-M2.7"
+    flash = "minimax/MiniMax-M3.1-Flash"
+    m3 = "minimax/MiniMax-M3"
+    app_env["orchestrator"]["runtime_profile"]["stages"] = {"execute": "opencode"}
+    app_env["execution"] = {"default_model": legacy}
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(persistence, "apply_config_values", lambda values: captured.update(values))
+    monkeypatch.setattr(
+        "ouroboros.config_tui.app.installed_backends", lambda: {"opencode": "/bin/opencode"}
+    )
+    listing = (legacy, m3, flash, "custom/MiniMax-M2.7", "minimax/speech-02-hd") + tuple(
+        f"provider/model-{i}" for i in range(extra_count)
+    )
+    monkeypatch.setattr(
+        "ouroboros.config_tui.app.refresh_models",
+        lambda backend: listing if backend == "opencode" else None,
+    )
+    app = SettingsApp()
+    async with app.run_test() as pilot:
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        choices = app._all_models("opencode")
+        assert legacy not in choices
+        assert choices.index(flash) < choices.index(m3)
+        assert "custom/MiniMax-M2.7" in choices
+        assert "minimax/speech-02-hd" in choices
+        select = app.query_one(f"#stage-model-{Stage.EXECUTE.value}", Select)
+        assert select.value == legacy
+        assert CUSTOM_SENTINEL in {value for _, value in select._options}
+        if extra_count:
+            select.value = SEARCH_SENTINEL
+            await pilot.pause()
+            app.screen.query_one("#search-input", Input).value = "minimax/MiniMax-M"
+            await pilot.pause()
+            results = app.screen.query_one("#search-results", OptionList)
+            assert results.option_count == 2
+            await pilot.press("escape")
+            await pilot.pause()
+            assert select.value == legacy
+        app.action_save()
+        await pilot.pause()
+    assert "execution.default_model" not in captured
 
 
 @pytest.mark.asyncio
@@ -720,13 +769,13 @@ async def test_execute_backend_change_preserves_replacement_execute_model(
         await pilot.pause()
         pilot.app.query_one(
             f"#stage-model-{Stage.EXECUTE.value}", Select
-        ).value = "claude-sonnet-4-6"
+        ).value = "claude-sonnet-5-5"
         await pilot.pause()
         pilot.app.action_save()
         await pilot.pause()
 
     assert captured["orchestrator.runtime_profile.stages.execute"] == "claude"
-    assert captured["execution.default_model"] == "claude-sonnet-4-6"
+    assert captured["execution.default_model"] == "claude-sonnet-5-5"
 
 
 @pytest.mark.asyncio
@@ -747,7 +796,7 @@ async def test_execute_backend_change_clears_pin_instead_of_persisting_automatic
         pilot.app.query_one(f"#stage-runtime-{Stage.EXECUTE.value}", Select).value = "claude"
         await pilot.pause()
         displayed = pilot.app.query_one(f"#stage-model-{Stage.EXECUTE.value}", Select).value
-        assert displayed == "claude-opus-5"
+        assert displayed == "claude-opus-5-5"
         # Textual may deliver the automatic model selection after the
         # programmatic guard was consumed under full-suite timing. Saving must
         # still treat this backend-switch default as automatic, not a user pin.

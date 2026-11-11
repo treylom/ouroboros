@@ -5,6 +5,7 @@ Supports both standard workflow execution and agent-runtime orchestrator mode.
 """
 
 import asyncio
+from collections.abc import Mapping
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
@@ -178,7 +179,7 @@ def _load_seed_from_yaml(seed_file: Path) -> dict[str, Any]:
         raise typer.Exit(1)
 
     try:
-        with open(seed_file) as f:
+        with open(seed_file, encoding="utf-8") as f:
             data: dict[str, Any] = yaml.safe_load(f)
             return data
     except Exception as e:
@@ -531,6 +532,18 @@ def _resolve_resume_fat_harness_mode(
     )
 
 
+def _resolve_resume_checkpoint_store_enabled(progress: Mapping[str, Any]) -> bool:
+    """Carry a persisted checkpoint mode into runner assembly on resume.
+
+    Only an actual boolean can select the old no-store mode. The runner still
+    validates the full durable contract and its proof before resuming.
+    """
+    contract = progress.get("execution_contract")
+    semantics = contract.get("execution_semantics") if isinstance(contract, Mapping) else None
+    mode = semantics.get("checkpoint_store_enabled") if isinstance(semantics, Mapping) else None
+    return mode if type(mode) is bool else True
+
+
 def _resolve_max_parallel_workers() -> int:
     """Resolve the parallel worker cap from environment, config, then default."""
     env_value = os.environ.get("OUROBOROS_MAX_PARALLEL_WORKERS", "").strip()
@@ -634,6 +647,7 @@ async def _record_cli_run_outcome(
     status and sends only its anonymous no-evidence count
     (``acceptance_no_evidence``). Never raises.
     """
+    from ouroboros.mcp.tools.run_ac_tally import derive_run_ac_tally
     from ouroboros.mcp.tools.run_failure_meta import derive_run_failure_meta
     from ouroboros.orchestrator.session import SessionStatus
 
@@ -682,6 +696,16 @@ async def _record_cli_run_outcome(
                 check_package_run.finish(terminal_status, surface="cli_run")
             except Exception:
                 pass
+        if session_id is not None:
+            # Same enrichment rule: the tally never blocks the outcome.
+            try:
+                result_meta.update(
+                    await derive_run_ac_tally(
+                        event_store, session_id=session_id, execution_id=execution_id
+                    )
+                )
+            except Exception:
+                pass
         usage_telemetry.capture_job_outcome(
             f"{execution_id}:{uuid4().hex}",
             "run",
@@ -725,20 +749,21 @@ async def _run_orchestrator(
         project_dir: Optional explicit project directory for seed path resolution.
         project_fallback_dir: Directory to stand in for the Seed file's folder
             when the Seed itself does not say where it belongs.
-        check_package: ``--check-package`` / ``--no-check-package``; ``None``
-            defers to ``OUROBOROS_CHECK_PACKAGE``, then ``boundary.check_package``,
-            then the default, which is on (``ouroboros.boundary.switch``).
+        check_package: ``--check-package`` (``decide``) / ``--no-check-package``
+            (``off``); ``None`` defers to ``OUROBOROS_CHECK_PACKAGE``, then
+            ``boundary.check_package``, then the default, which is ``record``
+            (``ouroboros.boundary.switch``).
         auto_evaluate: Override ``execution.auto_evaluate`` for this run.
         auto_evolve: Override ``execution.auto_evolve`` for this run.
     """
     from ouroboros.core.seed import Seed
     from ouroboros.orchestrator import (
-        OrchestratorRunner,
         create_agent_runtime,
         create_agent_runtime_async,
         preflight_agent_runtime,
         resolve_agent_runtime_backend,
     )
+    from ouroboros.orchestrator.runner_factory import build_orchestrator_runner
     from ouroboros.orchestrator.session import SessionRepository
     from ouroboros.persistence.event_store import EventStore
 
@@ -804,6 +829,7 @@ async def _run_orchestrator(
     workspace: TaskWorkspace | None = None
     execution_id: str | None = None
     session_id_for_run: str | None = None
+    checkpoint_store_enabled = True
 
     try:
         if resume_session:
@@ -824,6 +850,9 @@ async def _run_orchestrator(
             resolved_fat_harness_mode = _resolve_resume_fat_harness_mode(
                 seed_data,
                 reconstructed.value.progress,
+            )
+            checkpoint_store_enabled = _resolve_resume_checkpoint_store_enabled(
+                reconstructed.value.progress
             )
         else:
             session_id_for_run = f"orch_{uuid4().hex[:12]}"
@@ -868,17 +897,25 @@ async def _run_orchestrator(
     if runtime_blocker is not None:
         print_error(f"Runtime '{resolved_runtime_backend}' cannot execute: {runtime_blocker}")
         raise typer.Exit(1)
-    runner = OrchestratorRunner(
-        adapter,
-        event_store,
-        console,
+    runner = build_orchestrator_runner(
+        adapter=adapter,
+        event_store=event_store,
+        console=console,
         mcp_manager=mcp_manager,
         mcp_tool_prefix=mcp_tool_prefix,
         debug=debug,
         task_workspace=workspace,
+        enable_decomposition=True,
         max_decomposition_depth=resolved_max_decomposition_depth,
         max_parallel_workers=resolved_max_parallel_workers,
         fat_harness_mode=resolved_fat_harness_mode,
+        base_model_tier=None,
+        efficiency_mode=None,
+        frugality_assurance=None,
+        inherited_runtime_handle=None,
+        inherited_tools=None,
+        session_signal_hub=None,
+        checkpoint_store_enabled=checkpoint_store_enabled,
     )
 
     # The URL is emitted before execution starts so it can be opened while the
@@ -1083,13 +1120,14 @@ async def _prepare_check_package_boundary(
     runtime_backend: str,
     execution_model: str | None,
 ) -> Any:
-    """Resolve the check-package switch and, when on, prepare the package before dispatch.
+    """Resolve the check-package switch and, unless off, prepare the package before dispatch.
 
     Returns the run's ``CheckPackageRun``. With the switch ``off`` nothing here
-    calls a model, writes an event, or changes the runner. With it ``on`` the
+    calls a model, writes an event, or changes the runner. Otherwise the
     package is frozen and admitted before the worker starts, and the runner
-    gets the acceptance authority that decides covered criteria before the
-    terminal status is persisted.
+    gets the acceptance authority, which in ``decide`` mode decides covered
+    criteria before the terminal status is persisted and in ``record`` mode
+    (the default) only records what it would have decided.
     """
     from ouroboros.boundary.ledger import BoundaryOrderError
     from ouroboros.boundary.run_control import CheckPackageRun
@@ -1231,9 +1269,12 @@ def workflow(
             "--check-package/--no-check-package",
             help=(
                 "Before the worker starts, build executable checks from the acceptance "
-                "criteria, admit them on the current tree, and let them decide the "
-                "criteria they cover. On by default; --no-check-package opts out (or "
-                "OUROBOROS_CHECK_PACKAGE=off, or boundary.check_package: off in config). "
+                "criteria and admit them on the current tree. By default they only "
+                "record what they would have decided on the finished work (record mode); "
+                "--check-package lets them decide the criteria they cover (or "
+                "OUROBOROS_CHECK_PACKAGE=decide, or boundary.check_package: decide in "
+                "config); --no-check-package turns them off (or OUROBOROS_CHECK_PACKAGE=off, "
+                "or boundary.check_package: off). "
                 "The checks are model-written Python scripts. They run on throwaway "
                 "copies of the project with the project's interpreter, a per-check "
                 "timeout, and an allowlisted environment, confined by the execution "

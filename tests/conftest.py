@@ -5,11 +5,54 @@ import inspect
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 import tempfile
 
 import pytest
 import pytest_asyncio
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """Classify tests before marker selection and xdist's loadgroup scheduling."""
+    integration_root = Path(__file__).resolve().parent / "integration"
+    for item in items:
+        if item.path.is_relative_to(integration_root):
+            item.add_marker(pytest.mark.integration)
+        if isinstance(item, pytest.Function) and "built_wheel" in item.fixturenames:
+            item.add_marker(pytest.mark.slow)
+            item.add_marker(pytest.mark.xdist_group("built_wheel"))
+
+
+@pytest.fixture(scope="session")
+def built_wheel(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Build one wheel for packaging-contract tests that inspect its contents.
+
+    The wheel is an immutable artifact for the duration of a test session;
+    rebuilding it in each test only repeats a 20–30 second subprocess.
+    Parallel runs must use --dist loadgroup so every consumer shares a worker.
+    """
+    uv = shutil.which("uv")
+    if uv is None:
+        pytest.skip("uv not on PATH; wheel packaging tests require a build")
+    output = tmp_path_factory.mktemp("built-wheel")
+    project_root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [uv, "build", "--wheel", "--out-dir", str(output)],
+        cwd=project_root,
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"uv build failed: stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+    wheels = list(output.glob("*.whl"))
+    assert len(wheels) == 1, f"expected exactly one wheel, got {wheels}"
+    return wheels[0]
+
 
 # In CI, GITHUB_ACTIONS env var causes Typer to set force_terminal=True on
 # Rich Console (see typer/rich_utils.py:75-78). This makes Rich emit ANSI
@@ -208,6 +251,22 @@ def block_interview_answer_refiner_cli_spawn(monkeypatch):
         mod = sys.modules.get(mod_name)
         if mod is not None and hasattr(mod, "build_answer_refiner"):
             monkeypatch.setattr(mod, "build_answer_refiner", lambda: None)
+
+
+@pytest.fixture(autouse=True)
+def block_interview_investigator_cli_spawn(monkeypatch):
+    """Stop the auto self-answer investigator from spawning real agent CLIs.
+
+    ``build_repo_investigator()`` returns a ``RepoInvestigator`` that builds an
+    agent runtime (claude, codex, ...) per routed interview question. Its own
+    fallback, ``None``, keeps the deterministic answerer, so this matches a
+    machine without any agent CLI. Tests that exercise the investigator inject
+    one directly or re-patch after this fixture and win.
+    """
+    for mod_name in ("ouroboros.mcp.tools.auto_handler", "ouroboros.cli.commands.auto"):
+        mod = sys.modules.get(mod_name)
+        if mod is not None and hasattr(mod, "build_repo_investigator"):
+            monkeypatch.setattr(mod, "build_repo_investigator", lambda *_a, **_k: None)
 
 
 @pytest.fixture(autouse=True)
