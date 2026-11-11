@@ -7,7 +7,7 @@
         "--python",
         ">=3.12",
         "--from",
-        "git+https://github.com/treylom/ouroboros.git@km-main[mcp]",
+        "git+https://github.com/treylom/ouroboros.git@9ea923ee0346f31f77608c706928f7e649c65e61[mcp]",
         "ouroboros",
         "mcp",
         "serve",
