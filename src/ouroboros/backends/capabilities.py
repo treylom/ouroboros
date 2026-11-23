@@ -794,11 +794,7 @@ def render_mcp_server_instructions() -> str:
         "undeclared: use the native parallel primitive if available, else "
         "process the payloads sequentially. A passive plugin bridge "
         "consumes `_subagents` itself. Preserve user-facing content while assistive "
-        "work runs, except an interview question whose meta carries "
-        "`question_release=held_until_fanout_complete`: that question is a draft, "
-        "shown to the user only after `ouroboros_submit_fanout_results` returns "
-        "`question_release: released` (show its `releasable_question`). "
-        "During background execution, keep pumping `ouroboros_job_wait` "
+        "work runs. During background execution, keep pumping `ouroboros_job_wait` "
         "with bounded timeouts: spawn each `pending_host_dispatches` entry the same "
         "way and submit each result via `ouroboros_submit_fanout_results`."
     )
