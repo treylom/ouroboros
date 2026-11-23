@@ -225,3 +225,41 @@ async def test_handler_reply_carries_releasable_question_only_when_complete(
     assert done.meta["question_release"] == QUESTION_RELEASE_RELEASED
     assert done.meta["releasable_question"] == QUESTION
     assert QUESTION in done.content[0].text
+
+
+def test_attach_does_not_hold_when_no_lane_is_required(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fan-out with only optional lanes has nothing to wait for."""
+    import ouroboros.mcp.tools.question_advisory as qa
+
+    real = qa.build_question_advisory_subagents
+
+    def optional_only(request: Any) -> list[Any]:
+        payloads = real(request)
+        for payload in payloads:
+            payload.context["required"] = False
+        return payloads
+
+    monkeypatch.setattr(qa, "build_question_advisory_subagents", optional_only)
+    meta, _ = _attach(tmp_path, registry=True)
+    assert "question_advisory_fanout_id" in meta
+    assert "question_release" not in meta
+
+
+def test_other_fanout_kinds_carry_no_release_fields(tmp_path: Path) -> None:
+    from ouroboros.mcp.tools.fanout import FANOUT_KIND_LATERAL_PERSONA_PANEL
+
+    reg = FanoutRegistry(tmp_path / "fanout")
+    fanout_id = reg.register(
+        kind=FANOUT_KIND_LATERAL_PERSONA_PANEL,
+        session_id="s1",
+        correlation_key="context.persona",
+        expected_keys=["researcher"],
+        synthesizer_input={"entries": [], "question": QUESTION},
+        required_keys=["researcher"],
+    )
+    record = reg.load(fanout_id)
+    assert record is not None
+    assert question_release_fields(record, complete=True) == {}
+    assert question_release_fields(record, complete=False) == {}

@@ -855,7 +855,9 @@ def test_the_record_never_holds_what_a_child_said(tmp_path: Any) -> None:
     assert "advice" not in on_disk
     record = registry.load(fanout_id)
     assert record is not None
-    assert set(record.synthesizer_input) == {"lane_ids"}
+    # The server's own question is request-side data (it is held for release);
+    # nothing a child said may join it.
+    assert set(record.synthesizer_input) == {"lane_ids", "question"}
 
 
 # --------------------------------------------------------------------------- #

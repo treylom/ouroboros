@@ -291,7 +291,11 @@ the user answers the question in their own words, with the evidence in view.
 
 **B. Show content + get user input** (once A2's lanes have returned):
 
-The question text was already shown in A2 and the user may answer it at any
+If the response carried `meta.question_release = "held_until_fanout_complete"`
+(the directive says "DRAFT — do not show the user"), the question has NOT been
+shown yet: show it only after `ouroboros_submit_fanout_results` returns
+`question_release: "released"`, using its `releasable_question` text. Otherwise
+the question text was already shown in A2 and the user may answer it at any
 point; what waits here is your formal prompt, not the person.
 
 Print the MCP content text to the user first, with the lane findings beside it.
