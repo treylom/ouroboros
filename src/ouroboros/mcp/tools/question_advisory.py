@@ -41,7 +41,11 @@ from ouroboros.mcp.tools.advisory_prompts import (
     _data_context_lane_brief,
     _data_context_lane_task,
 )
-from ouroboros.mcp.tools.fanout import FanoutRegistry, stamp_question_advisory_fanout
+from ouroboros.mcp.tools.fanout import (
+    QUESTION_RELEASE_HELD,
+    FanoutRegistry,
+    stamp_question_advisory_fanout,
+)
 from ouroboros.mcp.tools.recent_findings import recent_findings_by_lane
 from ouroboros.mcp.tools.subagent import (
     _INTERVIEW_ADVISORY_MAX_JSON_CHARS,
@@ -761,7 +765,16 @@ def attach_question_advisory(
             if repository_roster is not None
             else None
         ),
+        question=question,
     )
+    # A question with required lanes and a way to redeem them is a draft until
+    # those lanes are submitted complete: the host must not show it yet, and the
+    # completing ``ouroboros_submit_fanout_results`` reply hands it back. Without
+    # a fan-out id there is no redemption, so holding would hold it forever.
+    if "question_advisory_fanout_id" in meta and any(
+        bool(payload.context.get("required")) for payload in payloads
+    ):
+        meta["question_release"] = QUESTION_RELEASE_HELD
     record_subagent_dispatch_emitted(
         fanout_kind="question_advisory",
         payload_count=len(payloads),
