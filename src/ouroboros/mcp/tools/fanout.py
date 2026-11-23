@@ -694,7 +694,9 @@ def question_release_fields(record: FanoutRecord, *, complete: bool) -> dict[str
             "question_release": QUESTION_RELEASE_HELD,
             "question_release_rule": (
                 "The interview question is still a draft. Do not show it to the "
-                "user until this fan-out returns status complete."
+                "user until this fan-out returns status complete. Resubmit every "
+                "lane; a required lane you could not spawn is submitted as "
+                '{"key": <lane>, "undispatched": true}.'
             ),
         }
     question = str(record.synthesizer_input.get("question") or "")

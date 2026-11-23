@@ -205,12 +205,18 @@ def test_advisory_producer_byte_identical_without_registry() -> None:
 
 
 def test_advisory_registry_delta_is_exactly_fanout_id(tmp_path: Any) -> None:
-    """Adding a registry adds exactly one key: question_advisory_fanout_id."""
+    """Adding a registry adds the fan-out id and, with required lanes, the hold.
+
+    ``question_release`` is set only when a fan-out id exists to redeem it
+    (holding a question nothing can release would hold it forever), so it is
+    part of the same registry delta.
+    """
     without = _advisory_meta(SubagentDispatchMode.HOST_DRIVEN)
     registry = FanoutRegistry(tmp_path)
     with_registry = _advisory_meta(SubagentDispatchMode.HOST_DRIVEN, fanout_registry=registry)
     added = set(with_registry) - set(without)
-    assert added == {"question_advisory_fanout_id"}
+    assert added == {"question_advisory_fanout_id", "question_release"}
+    assert with_registry["question_release"] == "held_until_fanout_complete"
     # Every shared key is byte-identical.
     for key in without:
         assert with_registry[key] == without[key]

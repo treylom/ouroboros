@@ -174,11 +174,17 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    `last_question` is required on this path so MCP can persist the real
    transcript even though the parent session generated the question.
 
-   **Question-first advisory fanout**:
-   If an MCP response includes `meta.question_advisory_request`, show the
-   interview question to the user first, then use the advisory request as a
-   parent-session assist layer. The advisory exists to help the human answer;
-   it must not hide, replace, or delay the question itself.
+   **Advisory fanout — the question is a draft until required lanes complete**:
+   If an MCP response includes `meta.question_advisory_request`, use it as a
+   parent-session assist layer. When the response also carries
+   `meta.question_release = "held_until_fanout_complete"` (the directive says
+   "DRAFT — do not show the user"), do NOT show the question to the user yet:
+   run the lanes, submit them with `ouroboros_submit_fanout_results`, and show
+   the question only when that reply returns `question_release: "released"` —
+   show its `releasable_question` text. A `partial` reply keeps it held. A lane
+   you could not spawn is submitted as `{"key": <lane>, "undispatched": true}`.
+   Without that marker (no required lanes, or no `fanout_id` to redeem), show
+   the question first; the advisory must not replace it.
 
    Read the stamped dispatch contract before running the lanes. With
    `dispatch_mode="host_driven"`, use the declared native parallel mechanism.
