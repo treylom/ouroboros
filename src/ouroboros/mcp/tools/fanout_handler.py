@@ -212,12 +212,16 @@ class SubmitFanoutResultsHandler:
             received_count=received_count,
             undispatched_count=undispatched_count,
         )
+        # The published envelope says only that synthesis completed; the host
+        # also needs to know the held interview question may now be shown, and
+        # what it is. The envelope is a closed model (``DisposableResultEnvelope``
+        # forbids extra keys), so the release travels as a second content item
+        # and ``meta`` stays exactly the envelope. Partial replies are not
+        # envelopes and already carry the held state from
+        # ``prepare_fanout_results``.
+        release: dict[str, Any] = {}
         if record is not None and isinstance(prepared, PreparedFanoutSynthesis):
-            # The published envelope says only that synthesis completed; the
-            # host also needs to know the held interview question may now be
-            # shown, and what it is. Partial replies already carry the held
-            # state from ``prepare_fanout_results``.
-            outcome = {**outcome, **question_release_fields(record, complete=True)}
+            release = question_release_fields(record, complete=True)
         if outcome.get("status") == "unknown_fanout_id":
             return Result.err(
                 MCPToolError(
@@ -231,6 +235,16 @@ class SubmitFanoutResultsHandler:
                     MCPContentItem(
                         type=ContentType.TEXT,
                         text=json.dumps(outcome, ensure_ascii=False, sort_keys=True),
+                    ),
+                    *(
+                        (
+                            MCPContentItem(
+                                type=ContentType.TEXT,
+                                text=json.dumps(release, ensure_ascii=False, sort_keys=True),
+                            ),
+                        )
+                        if release
+                        else ()
                     ),
                 ),
                 is_error=False,

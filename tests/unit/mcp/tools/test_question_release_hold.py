@@ -16,11 +16,13 @@ visible". These tests pin the replacement contract:
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from ouroboros.core.disposable_memory import DisposableResultEnvelope
 from ouroboros.mcp.tools.advisory_dispatch import (
     append_question_advisory_dispatch,
     split_appended_dispatch,
@@ -222,9 +224,14 @@ async def test_handler_reply_carries_releasable_question_only_when_complete(
     done = (
         await handler.handle({**base, "results": [{"key": "code_context", "content": {"c": 1}}]})
     ).unwrap()
-    assert done.meta["question_release"] == QUESTION_RELEASE_RELEASED
-    assert done.meta["releasable_question"] == QUESTION
-    assert QUESTION in done.content[0].text
+    # meta stays exactly the closed disposable envelope ...
+    DisposableResultEnvelope.model_validate(done.meta)
+    assert "question_release" not in done.meta
+    # ... and the release rides in a second content item.
+    assert len(done.content) == 2
+    release = json.loads(done.content[1].text)
+    assert release["question_release"] == QUESTION_RELEASE_RELEASED
+    assert release["releasable_question"] == QUESTION
 
 
 def test_attach_does_not_hold_when_no_lane_is_required(
