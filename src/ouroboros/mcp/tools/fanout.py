@@ -529,9 +529,14 @@ def _advisory_synthesizer_input(
     tool_name: str | None,
     roster_repo_ids: list[str] | None,
     phase: str | None,
+    question: str | None = None,
 ) -> dict[str, Any]:
     """Return the request-side state one advisory fan-out persists."""
     data: dict[str, Any] = {"lane_ids": list(expected_keys)}
+    # The question is held here while its required lanes run, and handed back
+    # by the completing submission: see ``question_release_fields``.
+    if question:
+        data["question"] = question
     if tool_name and tool_name != "ouroboros_interview":
         data["tool_name"] = tool_name
     if roster_repo_ids is not None:
@@ -551,6 +556,7 @@ def register_question_advisory_fanout(
     tool_name: str | None = None,
     roster_repo_ids: list[str] | None = None,
     phase: str | None = None,
+    question: str | None = None,
 ) -> str | None:
     """Register an interview question-advisory fan-out for later result re-entry.
 
@@ -624,6 +630,7 @@ def register_question_advisory_fanout(
             tool_name=tool_name,
             roster_repo_ids=roster_repo_ids,
             phase=phase,
+            question=question,
         ),
         fanout_id=fanout_id,
         required_keys=required_keys,
@@ -639,6 +646,7 @@ def stamp_question_advisory_fanout(
     tool_name: str | None = None,
     roster_repo_ids: list[str] | None = None,
     phase: str | None = None,
+    question: str | None = None,
 ) -> None:
     """Register the advisory fan-out and stamp its id, if there is one to stamp.
 
@@ -657,9 +665,43 @@ def stamp_question_advisory_fanout(
         tool_name=tool_name,
         roster_repo_ids=roster_repo_ids,
         phase=phase,
+        question=question,
     )
     if fanout_id is not None:
         meta["question_advisory_fanout_id"] = fanout_id
+
+
+#: ``question_release`` values. A question whose advisory fan-out still has
+#: required lanes outstanding is a *draft*: the host holds it and shows the user
+#: nothing until the submission that completes the fan-out hands it back.
+QUESTION_RELEASE_HELD = "held_until_fanout_complete"
+QUESTION_RELEASE_RELEASED = "released"
+
+
+def question_release_fields(record: FanoutRecord, *, complete: bool) -> dict[str, Any]:
+    """Return the release state a question-advisory submission reply carries.
+
+    Only question-advisory records hold a question, so every other kind gets an
+    empty mapping and its reply is unchanged. A record that has no required
+    lanes never held its question in the first place, so it reports nothing
+    either. ``complete`` is the submission's verdict: a partial reply keeps the
+    question held, and only a complete one returns it as releasable.
+    """
+    if record.kind != FANOUT_KIND_QUESTION_ADVISORY or not record.gating_keys():
+        return {}
+    if not complete:
+        return {
+            "question_release": QUESTION_RELEASE_HELD,
+            "question_release_rule": (
+                "The interview question is still a draft. Do not show it to the "
+                "user until this fan-out returns status complete."
+            ),
+        }
+    question = str(record.synthesizer_input.get("question") or "")
+    fields: dict[str, Any] = {"question_release": QUESTION_RELEASE_RELEASED}
+    if question:
+        fields["releasable_question"] = question
+    return fields
 
 
 def stamp_lateral_persona_fanout(
@@ -1028,6 +1070,7 @@ def prepare_fanout_results(
                 "Resubmit every lane you hold, not only the missing ones. "
                 "No submitted output is retained between calls."
             ),
+            **question_release_fields(record, complete=False),
         }
 
     completion_report = {
@@ -1152,6 +1195,7 @@ def synthesize_fanout_results(prepared: PreparedFanoutSynthesis) -> dict[str, An
             },
             "result": outcome,
             **completion_report,
+            **question_release_fields(record, complete=True),
         }
 
     if record.kind == FANOUT_KIND_HOST_EXECUTION:
@@ -1366,6 +1410,9 @@ __all__ = [
     "register_question_advisory_fanout",
     "stamp_lateral_persona_fanout",
     "stamp_question_advisory_fanout",
+    "question_release_fields",
+    "QUESTION_RELEASE_HELD",
+    "QUESTION_RELEASE_RELEASED",
     "submit_fanout_results",
     "synthesize_fanout_results",
 ]

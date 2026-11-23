@@ -42,6 +42,8 @@ _PAYLOADS_KEY = "question_advisory_subagents"
 _CORRELATION_KEY = "question_advisory_result_correlation_key"
 _FANOUT_ID_KEY = "question_advisory_fanout_id"
 _DEFAULT_CORRELATION_KEY = "context.lane_id"
+_QUESTION_RELEASE_KEY = "question_release"
+_QUESTION_RELEASE_HELD = "held_until_fanout_complete"
 _SEQUENTIAL_HOST_ACTION = "process_payloads_sequentially"
 _HOST_DECIDES_ACTION = "dispatch_subagents_if_supported"
 
@@ -161,12 +163,28 @@ def append_question_advisory_dispatch(response_text: str, meta: dict[str, Any]) 
     else:
         directive = "spawn one subagent per payload below with your native subagent primitive"
 
+    # A held question is a draft. The earlier wording -- "keep the question
+    # above visible" -- read to a host as "show it to the user", so the user was
+    # asked before the lanes meant to make the question easier had answered.
+    # The question text itself stays first (``question_advisory_preserve_content``
+    # and the auto driver's parse both rely on that); what changes is what the
+    # host is told to do with it.
+    held = meta.get(_QUESTION_RELEASE_KEY) == _QUESTION_RELEASE_HELD
+    if held:
+        opening = (
+            f"{_HOST_DIRECTIVE_OPENING}{host_action}:** the question above is a "
+            "DRAFT — do not show the user. Hold it, then "
+        )
+    else:
+        opening = (
+            f"{_HOST_DIRECTIVE_OPENING}{host_action}:** keep the question above visible, then "
+        )
     lines = [
         response_text,
         "",
         QUESTION_ADVISORY_DISPATCH_MARKER,
         "",
-        f"{_HOST_DIRECTIVE_OPENING}{host_action}:** keep the question above visible, then "
+        f"{opening}"
         f"{directive}. Dispatch the payloads as issued rather than rewriting them "
         f"from this prose. Correlate results by `{correlation_key}`.",
         "",
@@ -184,6 +202,14 @@ def append_question_advisory_dispatch(response_text: str, meta: dict[str, Any]) 
             "Submit results with `ouroboros_submit_fanout_results` "
             f"(`fanout_id`: `{fanout_id}`, `correlation_key`: `{correlation_key}`).",
         ]
+        if held:
+            lines += [
+                "",
+                "Release rule: the question stays a draft while the reply is "
+                "`partial`. Show the user the question only after the reply "
+                "returns `question_release: released`, and show its "
+                "`releasable_question` text.",
+            ]
         session_id = meta.get("session_id") or "<session_id>"
         example = {
             "fanout_id": str(fanout_id),

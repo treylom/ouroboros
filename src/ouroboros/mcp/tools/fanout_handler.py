@@ -19,6 +19,7 @@ from ouroboros.mcp.tools.fanout import (
     FanoutRegistry,
     PreparedFanoutSynthesis,
     prepare_fanout_results,
+    question_release_fields,
     synthesize_fanout_results,
 )
 from ouroboros.mcp.types import (
@@ -211,6 +212,12 @@ class SubmitFanoutResultsHandler:
             received_count=received_count,
             undispatched_count=undispatched_count,
         )
+        if record is not None and isinstance(prepared, PreparedFanoutSynthesis):
+            # The published envelope says only that synthesis completed; the
+            # host also needs to know the held interview question may now be
+            # shown, and what it is. Partial replies already carry the held
+            # state from ``prepare_fanout_results``.
+            outcome = {**outcome, **question_release_fields(record, complete=True)}
         if outcome.get("status") == "unknown_fanout_id":
             return Result.err(
                 MCPToolError(
